@@ -1,0 +1,14 @@
+[project]
+name = "basic-mixed"
+
+[r]
+version = "4.5"
+packages = ["tidyverse", "reticulate"]
+
+[python]
+version = "3.12"
+packages = ["pandas", "scikit-learn"]
+
+[tasks]
+analysis = "Rscript scripts/analysis.R"
+model = "python scripts/model.py"

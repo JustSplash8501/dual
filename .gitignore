@@ -1,0 +1,35 @@
+# Rust build output
+/target/
+
+# dual-generated project environments
+**/.dual/
+
+# dual.lock is intentionally tracked as the reproducibility contract.
+
+# Local environment files
+.env
+.env.*
+!.env.example
+
+# Editor and IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Operating-system metadata
+.DS_Store
+._*
+Thumbs.db
+Desktop.ini
+
+# Test and coverage output
+/.coverage/
+/coverage/
+*.profraw
+*.profdata
+
+# Temporary files
+*.tmp
+*.log
