@@ -136,6 +136,17 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo fmt --all -- --check
 ```
 
+### Releases
+
+Pushing a version tag that matches `Cargo.toml` builds archives and SHA-256
+checksums for Linux x86-64, macOS Apple Silicon, and Windows x86-64, then
+publishes them to a GitHub release:
+
+```console
+git tag v0.1.0
+git push origin v0.1.0
+```
+
 ## Mixed R/Python example
 
 [`examples/basic-mixed`](examples/basic-mixed) contains an R task, a Python
