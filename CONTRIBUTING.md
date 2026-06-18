@@ -20,7 +20,7 @@ Requirements:
 Clone the repository and build the CLI:
 
 ```console
-git clone https://github.com/OWNER/dual.git
+git clone https://github.com/JustSplash8501/dual.git
 cd dual
 cargo build
 ```
