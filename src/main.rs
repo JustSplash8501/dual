@@ -14,7 +14,12 @@ fn main() {
 
 fn run() -> Result<()> {
     let cli = Cli::parse();
-    let root = std::env::current_dir()?;
+    let current = std::env::current_dir()?;
+    let root = if matches!(cli.command, Commands::Init { .. }) {
+        current
+    } else {
+        Config::find_root(&current)?
+    };
     let backend = EnvironmentBackend::new(&root, cli.verbose);
 
     match cli.command {
@@ -32,6 +37,17 @@ fn init(root: &std::path::Path, force: bool, name: Option<&str>) -> Result<()> {
     let path = Config::path(root);
     if path.exists() && !force {
         anyhow::bail!("dual.toml already exists. Use `dual init --force` to replace it.");
+    }
+    if force {
+        let state = root.join(".dual");
+        let lock = root.join("dual.lock");
+        if state.is_dir() {
+            std::fs::remove_dir_all(&state)?;
+        }
+        if lock.is_file() {
+            std::fs::remove_file(&lock)?;
+        }
+        println!("Invalidated the previous environment and lockfile.");
     }
 
     let project_name = name.unwrap_or("my-project");

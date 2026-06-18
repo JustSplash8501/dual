@@ -69,3 +69,42 @@ jobs:
 
       - name: Build release binary
         run: cargo build --locked --release
+
+  integration:
+    name: Real environment (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build dual
+        run: cargo build --locked --release
+
+      - name: Run real integration test
+        if: runner.os != 'Windows'
+        env:
+          DUAL_BIN: ${{ github.workspace }}/target/release/dual
+          DUAL_HOME: ${{ runner.temp }}/dual-home
+          DUAL_ENGINE_DISABLE_PATH_FALLBACK: "1"
+        run: bash scripts/ci/real-integration.sh
+
+      - name: Run real integration test
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          DUAL_BIN: ${{ github.workspace }}\target\release\dual.exe
+          DUAL_HOME: ${{ runner.temp }}\dual-home
+          DUAL_ENGINE_DISABLE_PATH_FALLBACK: "1"
+        run: ./scripts/ci/real-integration.ps1

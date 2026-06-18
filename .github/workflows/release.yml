@@ -13,8 +13,8 @@ permissions:
   contents: read
 
 jobs:
-  build-unix:
-    name: Build ${{ matrix.artifact }}
+  build:
+    name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
@@ -22,16 +22,24 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            artifact: dual-linux-x86_64
-          - os: macos-latest
-            artifact: dual-macos-aarch64
+            target: x86_64-unknown-linux-gnu
+          - os: macos-15
+            target: aarch64-apple-darwin
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
 
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
 
       - name: Verify tag matches crate version
         shell: bash
@@ -40,87 +48,67 @@ jobs:
           test "v${version}" = "${GITHUB_REF_NAME}"
 
       - name: Build
-        run: cargo build --locked --release
+        run: cargo build --locked --release --target ${{ matrix.target }}
 
-      - name: Package
+      - name: Package Unix binary
+        if: runner.os != 'Windows'
         shell: bash
         run: |
-          mkdir -p package
-          cp target/release/dual package/
-          cp README.md LICENSE package/
-          tar -czf "${{ matrix.artifact }}.tar.gz" -C package .
-          if command -v sha256sum >/dev/null 2>&1; then
-            sha256sum "${{ matrix.artifact }}.tar.gz" > "${{ matrix.artifact }}.tar.gz.sha256"
-          else
-            shasum -a 256 "${{ matrix.artifact }}.tar.gz" > "${{ matrix.artifact }}.tar.gz.sha256"
-          fi
+          version="${GITHUB_REF_NAME#v}"
+          archive="dual-${version}-${{ matrix.target }}.tar.gz"
+          mkdir package
+          cp "target/${{ matrix.target }}/release/dual" package/
+          cp README.md LICENSE THIRD_PARTY_NOTICES.md package/
+          tar -C package -czf "$archive" .
+
+      - name: Package Windows binary
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME.TrimStart("v")
+          $archive = "dual-$version-${{ matrix.target }}.zip"
+          New-Item -ItemType Directory package | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/dual.exe" package/
+          Copy-Item README.md,LICENSE,THIRD_PARTY_NOTICES.md package/
+          Compress-Archive -Path package/* -DestinationPath $archive
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
-          path: |
-            ${{ matrix.artifact }}.tar.gz
-            ${{ matrix.artifact }}.tar.gz.sha256
-          if-no-files-found: error
-
-  build-windows:
-    name: Build dual-windows-x86_64
-    runs-on: windows-latest
-    timeout-minutes: 30
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Verify tag matches crate version
-        shell: pwsh
-        run: |
-          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"$').Matches.Groups[1].Value
-          if ("v$version" -ne $env:GITHUB_REF_NAME) {
-            throw "Tag $env:GITHUB_REF_NAME does not match crate version $version"
-          }
-
-      - name: Build
-        run: cargo build --locked --release
-
-      - name: Package
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Path package
-          Copy-Item target/release/dual.exe, README.md, LICENSE package/
-          Compress-Archive -Path package/* -DestinationPath dual-windows-x86_64.zip
-          $hash = (Get-FileHash dual-windows-x86_64.zip -Algorithm SHA256).Hash.ToLower()
-          "$hash  dual-windows-x86_64.zip" | Set-Content dual-windows-x86_64.zip.sha256
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: dual-windows-x86_64
-          path: |
-            dual-windows-x86_64.zip
-            dual-windows-x86_64.zip.sha256
+          name: dual-${{ matrix.target }}
+          path: dual-*
           if-no-files-found: error
 
   publish:
     name: Publish GitHub release
-    needs:
-      - build-unix
-      - build-windows
+    needs: build
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     permissions:
       contents: write
+      id-token: write
+      attestations: write
 
     steps:
-      - uses: actions/checkout@v4
-
       - uses: actions/download-artifact@v4
         with:
-          path: artifacts
+          path: dist
+          merge-multiple: true
 
-      - name: Create release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" artifacts/*/* --verify-tag --generate-notes
+      - name: Generate checksums
+        working-directory: dist
+        run: sha256sum dual-* > SHA256SUMS
+
+      - name: Attest release artifacts
+        uses: actions/attest@v4
+        with:
+          subject-path: |
+            dist/dual-*
+            dist/SHA256SUMS
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v3
+        with:
+          generate_release_notes: true
+          files: |
+            dist/dual-*
+            dist/SHA256SUMS

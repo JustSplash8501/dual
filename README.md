@@ -6,7 +6,7 @@ You should not need to learn renv, venv, uv, conda, or reticulate just
 to run an analysis. `dual` gives a project one user-facing configuration file,
 one command-line interface, and one reproducible environment.
 
-> `dual` is an early MVP. The configuration format and generated backend files
+> `dual` is an early MVP. The configuration and lock formats
 > may change before 1.0.
 
 ## Quickstart
@@ -113,6 +113,14 @@ need to install a separate environment tool.
 
 R and Python do not need to be installed globally.
 
+### Install a release
+
+Download the archive for your platform from GitHub Releases, verify it against
+`SHA256SUMS`, extract it, and place `dual` (or `dual.exe`) on your `PATH`.
+Release archives are produced for Linux x86-64, macOS Apple Silicon, macOS
+Intel, and Windows x86-64. GitHub build-provenance attestations are published
+for every archive.
+
 ### Build from source
 
 [Rust](https://rustup.rs) 1.80 or newer is required only when building from
@@ -136,11 +144,12 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo fmt --all -- --check
 ```
 
-### Releases
+### Publishing releases
 
-Pushing a version tag that matches `Cargo.toml` builds archives and SHA-256
-checksums for Linux x86-64, macOS Apple Silicon, and Windows x86-64, then
-publishes them to a GitHub release:
+Pushing a version tag that matches `Cargo.toml` builds archives for Linux
+x86-64, macOS Apple Silicon, macOS Intel, and Windows x86-64. The release
+workflow publishes a consolidated `SHA256SUMS` file and GitHub provenance
+attestations:
 
 ```console
 git tag v0.1.0
@@ -172,8 +181,8 @@ the Python interpreter from the project environment.
 - `.dual/` — local generated environment state
 
 `.dual/` is generated locally and ignored. `dual.lock` is intentionally
-committed. It is a Dual-owned lockfile that embeds the Pixi resolution and,
-when needed, the `pak` resolution for source-backed R packages. Backend lock
+committed. It is a Dual-owned lockfile containing a neutral `environment`
+resolution and, when needed, the source-backed R resolution. Internal engine
 formats remain private implementation details under `.dual/`.
 
 When a collaborator receives `dual.toml` and `dual.lock`, `dual up` creates the
@@ -203,3 +212,6 @@ projects easy to reproduce.
 ## License
 
 MIT
+
+See [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) for automatically
+provisioned third-party components.

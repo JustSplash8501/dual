@@ -59,6 +59,15 @@ impl Config {
         Self::from_path(&Self::path(root))
     }
 
+    pub fn find_root(start: &Path) -> Result<PathBuf> {
+        for directory in start.ancestors() {
+            if Self::path(directory).is_file() {
+                return Ok(directory.to_path_buf());
+            }
+        }
+        Err(DualError::MissingConfig(start.display().to_string()).into())
+    }
+
     pub fn from_path(path: &Path) -> Result<Self> {
         if !path.exists() {
             return Err(DualError::MissingConfig(
@@ -108,7 +117,7 @@ impl Config {
             let valid = if section == "r" {
                 valid_r_package_reference(package)
             } else {
-                valid_package_name(package)
+                parse_python_requirement(package).is_ok()
             };
             if !valid {
                 anyhow::bail!("invalid package name: {package:?}");
@@ -165,7 +174,7 @@ fn validate_language(name: &str, language: &LanguageConfig) -> Result<()> {
         if name == "r" {
             !valid_r_package_reference(package)
         } else {
-            !valid_package_name(package)
+            parse_python_requirement(package).is_err()
         }
     }) {
         return Err(DualError::InvalidConfig(format!(
@@ -174,6 +183,81 @@ fn validate_language(name: &str, language: &LanguageConfig) -> Result<()> {
         .into());
     }
     Ok(())
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PythonRequirement {
+    pub name: String,
+    pub extras: Vec<String>,
+    pub version: String,
+}
+
+pub fn parse_python_requirement(requirement: &str) -> Result<PythonRequirement> {
+    let value = requirement.trim();
+    if value.is_empty()
+        || value.starts_with('-')
+        || value
+            .chars()
+            .any(|character| matches!(character, '\'' | '"' | '\n' | '\r' | ';' | '@'))
+    {
+        anyhow::bail!("unsupported Python requirement: {requirement:?}");
+    }
+
+    let split_at = value
+        .char_indices()
+        .find(|(_, character)| matches!(character, '<' | '>' | '=' | '!' | '~'))
+        .map(|(index, _)| index)
+        .unwrap_or(value.len());
+    let (name_and_extras, version) = value.split_at(split_at);
+    let version = if version.is_empty() { "*" } else { version };
+
+    let (name, extras) = if let Some(open) = name_and_extras.find('[') {
+        if !name_and_extras.ends_with(']') {
+            anyhow::bail!("malformed Python extras: {requirement:?}");
+        }
+        let name = &name_and_extras[..open];
+        let extras = &name_and_extras[open + 1..name_and_extras.len() - 1];
+        let extras = extras
+            .split(',')
+            .map(str::trim)
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        if extras.is_empty() || extras.iter().any(|extra| !valid_distribution_name(extra)) {
+            anyhow::bail!("malformed Python extras: {requirement:?}");
+        }
+        (name, extras)
+    } else {
+        (name_and_extras, Vec::new())
+    };
+
+    if !valid_distribution_name(name) || !valid_version_specifier(version) {
+        anyhow::bail!("unsupported Python requirement: {requirement:?}");
+    }
+
+    Ok(PythonRequirement {
+        name: name.to_owned(),
+        extras,
+        version: version.to_owned(),
+    })
+}
+
+fn valid_distribution_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
+        })
+}
+
+fn valid_version_specifier(value: &str) -> bool {
+    value == "*"
+        || (!value.chars().any(char::is_whitespace)
+            && value.chars().all(|character| {
+                character.is_ascii_alphanumeric()
+                    || matches!(
+                        character,
+                        '<' | '>' | '=' | '!' | '~' | '.' | ',' | '*' | '+' | '-'
+                    )
+            }))
 }
 
 fn valid_r_package_reference(package: &str) -> bool {
@@ -265,5 +349,34 @@ mod tests {
             config.r.packages = vec![package.into()];
             assert!(config.validate().is_err(), "{package} should be invalid");
         }
+    }
+
+    #[test]
+    fn parses_python_versions_and_extras() {
+        assert_eq!(
+            parse_python_requirement("pandas>=2,<3").unwrap(),
+            PythonRequirement {
+                name: "pandas".into(),
+                extras: vec![],
+                version: ">=2,<3".into(),
+            }
+        );
+        assert_eq!(
+            parse_python_requirement("requests[socks,security]==2.32.3").unwrap(),
+            PythonRequirement {
+                name: "requests".into(),
+                extras: vec!["socks".into(), "security".into()],
+                version: "==2.32.3".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn finds_project_root_from_a_subdirectory() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("dual.toml"), DEFAULT_CONFIG).unwrap();
+        let nested = directory.path().join("scripts/nested");
+        fs::create_dir_all(&nested).unwrap();
+        assert_eq!(Config::find_root(&nested).unwrap(), directory.path());
     }
 }
