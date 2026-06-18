@@ -2,13 +2,9 @@
 
 **A simple CLI for reproducible projects that use R, Python, or both.**
 
-[![Rust](https://img.shields.io/badge/Rust-000000?style=for-the-badge&logo=rust&logoColor=white)](https://www.rust-lang.org/)
-[![R](https://img.shields.io/badge/R-276DC3?style=for-the-badge&logo=r&logoColor=white)](https://www.r-project.org/)
-[![Python](https://img.shields.io/badge/Python-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
-[![ChatGPT](https://img.shields.io/badge/ChatGPT-74aa9c?style=for-the-badge&logo=openai&logoColor=white)](https://chatgpt.com/)
-[![Cross-platform](https://img.shields.io/badge/Cross--platform-Linux%20%7C%20macOS%20%7C%20Windows-6C63FF?style=for-the-badge)](#cross-platform-behavior)
-[![CI](https://img.shields.io/badge/CI-GitHub_Actions-2088FF?style=for-the-badge&logo=githubactions&logoColor=white)](.github/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge)](LICENSE)
+[![CI](https://github.com/JustSplash8501/dual/actions/workflows/ci.yml/badge.svg)](https://github.com/JustSplash8501/dual/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Platforms](https://img.shields.io/badge/platforms-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey.svg)](#cross-platform-behavior)
 
 You should not need to learn renv, venv, uv, conda, or reticulate just
 to run an analysis. `dual` gives a project one user-facing configuration file,
