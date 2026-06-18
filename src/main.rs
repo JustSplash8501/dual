@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::Parser;
 use dual::backend::{Backend, EnvironmentBackend};
-use dual::cli::{Cli, Commands, Language};
+use dual::cli::{Cli, Commands, EngineCommand, Language, LockCommand, TaskCommand};
 use dual::config::{Config, DEFAULT_CONFIG};
 use dual::{doctor, tasks};
 
@@ -15,7 +15,10 @@ fn main() {
 fn run() -> Result<()> {
     let cli = Cli::parse();
     let current = std::env::current_dir()?;
-    let root = if matches!(cli.command, Commands::Init { .. }) {
+    let root = if matches!(
+        &cli.command,
+        Commands::Init { .. } | Commands::Engine { .. }
+    ) {
         current
     } else {
         Config::find_root(&current)?
@@ -25,12 +28,52 @@ fn run() -> Result<()> {
     match cli.command {
         Commands::Init { force, name } => init(&root, force, name.as_deref()),
         Commands::Add { language, packages } => add(&root, language, &packages),
+        Commands::Remove { language, packages } => remove(&root, language, &packages),
         Commands::Up { refresh } => up(&root, &backend, refresh),
         Commands::Run { task } => tasks::run_task(&root, &backend, &task),
+        Commands::Task {
+            command: TaskCommand::List,
+        } => tasks::list_tasks(&root),
+        Commands::Engine {
+            command: EngineCommand::Update,
+        } => backend.update_engine(),
+        Commands::Engine {
+            command: EngineCommand::Uninstall,
+        } => {
+            if backend.uninstall_engine()? {
+                println!("Removed dual's private environment support.");
+            } else {
+                println!("No private environment support was installed.");
+            }
+            Ok(())
+        }
+        Commands::Lock {
+            command: LockCommand::Migrate,
+        } => {
+            if backend.migrate_lock()? {
+                println!("Migrated dual.lock to the current format.");
+            } else {
+                println!("dual.lock is already current.");
+            }
+            Ok(())
+        }
         Commands::Shell => shell(&root, &backend),
         Commands::Doctor => doctor::run(&root, &backend),
         Commands::Clean { yes } => clean(&root, &backend, yes),
     }
+}
+
+fn remove(root: &std::path::Path, language: Language, packages: &[String]) -> Result<()> {
+    let section = match language {
+        Language::R => "r",
+        Language::Py => "python",
+    };
+    let removed = Config::remove_packages(&Config::path(root), section, packages)?;
+    println!("Removed {removed} package(s) from dual.toml.");
+    if root.join("dual.lock").is_file() {
+        println!("Run `dual up --refresh` to update the shared environment lock.");
+    }
+    Ok(())
 }
 
 fn init(root: &std::path::Path, force: bool, name: Option<&str>) -> Result<()> {

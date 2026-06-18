@@ -6,6 +6,8 @@ rust-version = "1.80"
 description = "A simple CLI for reproducible projects that use R, Python, or both"
 license = "MIT"
 readme = "README.md"
+repository = "https://github.com/JustSplash8501/dual"
+homepage = "https://github.com/JustSplash8501/dual"
 keywords = ["reproducibility", "science", "r", "python"]
 categories = ["command-line-utilities", "science"]
 

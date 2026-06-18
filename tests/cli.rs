@@ -131,6 +131,49 @@ fn add_py_updates_packages() {
 }
 
 #[test]
+fn remove_packages_updates_config() {
+    let directory = initialized_project();
+    Command::cargo_bin("dual")
+        .unwrap()
+        .current_dir(directory.path())
+        .args(["add", "py", "pandas", "numpy"])
+        .assert()
+        .success();
+    Command::cargo_bin("dual")
+        .unwrap()
+        .current_dir(directory.path())
+        .args(["remove", "py", "pandas"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Removed 1 package"));
+
+    let config = fs::read_to_string(directory.path().join("dual.toml")).unwrap();
+    assert!(!config.contains("\"pandas\""));
+    assert!(config.contains("\"numpy\""));
+}
+
+#[test]
+fn task_list_prints_configured_tasks() {
+    let directory = initialized_project();
+    let path = directory.path().join("dual.toml");
+    fs::write(
+        &path,
+        fs::read_to_string(&path)
+            .unwrap()
+            .replace("[tasks]\n", "[tasks]\nanalysis = \"Rscript analysis.R\"\n"),
+    )
+    .unwrap();
+
+    Command::cargo_bin("dual")
+        .unwrap()
+        .current_dir(directory.path())
+        .args(["task", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("analysis\tRscript analysis.R"));
+}
+
+#[test]
 fn missing_task_has_useful_error() {
     let directory = initialized_project();
     Command::cargo_bin("dual")
@@ -464,6 +507,61 @@ fn automatic_install_rejects_a_bad_checksum() {
         .stderr(predicate::str::contains("failed its integrity check"));
 
     assert!(!home.join("engine/bin/dual-engine").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn engine_update_and_uninstall_manage_private_engine() {
+    let fixture = backend_fixture();
+    let home = fixture.project.path().join("dual-home");
+    let download_url = format!("file://{}", fixture.engine.display());
+    let checksum = sha256(&fs::read(&fixture.engine).unwrap());
+
+    Command::cargo_bin("dual")
+        .unwrap()
+        .current_dir(fixture.project.path())
+        .env("DUAL_HOME", &home)
+        .env("DUAL_ENGINE_DOWNLOAD_URL", download_url)
+        .env("DUAL_ENGINE_SHA256", checksum)
+        .args(["engine", "update"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Environment support updated"));
+    assert!(home.join("engine/bin/dual-engine").is_file());
+
+    Command::cargo_bin("dual")
+        .unwrap()
+        .current_dir(fixture.project.path())
+        .env("DUAL_HOME", &home)
+        .args(["engine", "uninstall"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Removed dual's private environment support",
+        ));
+    assert!(!home.join("engine").exists());
+}
+
+#[test]
+fn lock_migrate_rewrites_legacy_field() {
+    let directory = initialized_project();
+    fs::write(
+        directory.path().join("dual.lock"),
+        r#"{"version":1,"pixi":"legacy"}"#,
+    )
+    .unwrap();
+
+    Command::cargo_bin("dual")
+        .unwrap()
+        .current_dir(directory.path())
+        .args(["lock", "migrate"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Migrated dual.lock"));
+
+    let lock = fs::read_to_string(directory.path().join("dual.lock")).unwrap();
+    assert!(lock.contains("\"environment\""));
+    assert!(!lock.contains("\"pixi\""));
 }
 
 fn sha256(contents: &[u8]) -> String {

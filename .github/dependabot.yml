@@ -8,6 +8,10 @@ updates:
     open-pull-requests-limit: 5
     labels:
       - dependencies
+    ignore:
+      - dependency-name: "*"
+        update-types:
+          - version-update:semver-major
 
   - package-ecosystem: github-actions
     directory: /
@@ -16,3 +20,7 @@ updates:
     open-pull-requests-limit: 5
     labels:
       - dependencies
+    ignore:
+      - dependency-name: "*"
+        update-types:
+          - version-update:semver-major

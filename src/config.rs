@@ -164,6 +164,44 @@ impl Config {
         Self::from_path(path)?;
         Ok(())
     }
+
+    pub fn remove_packages(path: &Path, section: &str, packages: &[String]) -> Result<usize> {
+        if packages.is_empty() {
+            anyhow::bail!("provide at least one package name");
+        }
+        Self::from_path(path)?;
+        let contents = fs::read_to_string(path)?;
+        let mut document = contents
+            .parse::<DocumentMut>()
+            .map_err(|error| DualError::InvalidConfig(error.to_string()))?;
+        let array = document
+            .get_mut(section)
+            .and_then(Item::as_table_mut)
+            .and_then(|table| table.get_mut("packages"))
+            .and_then(Item::as_array_mut)
+            .ok_or_else(|| {
+                DualError::InvalidConfig(format!("[{section}].packages must be an array"))
+            })?;
+        let existing = array
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let retained = existing
+            .iter()
+            .filter(|package| !packages.contains(package))
+            .cloned()
+            .collect::<Vec<_>>();
+        let removed = existing.len() - retained.len();
+        let mut replacement = Array::new();
+        for package in retained {
+            replacement.push(package);
+        }
+        *array = replacement;
+        fs::write(path, document.to_string())?;
+        Self::from_path(path)?;
+        Ok(removed)
+    }
 }
 
 fn validate_language(name: &str, language: &LanguageConfig) -> Result<()> {

@@ -50,6 +50,53 @@ jobs:
       - name: Build
         run: cargo build --locked --release --target ${{ matrix.target }}
 
+      - name: Sign and notarize macOS binary
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          if [ -z "$APPLE_CERTIFICATE_P12" ]; then
+            echo "Apple signing credentials are not configured; publishing an unsigned binary."
+            exit 0
+          fi
+          keychain="$RUNNER_TEMP/dual-signing.keychain-db"
+          security create-keychain -p actions "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p actions "$keychain"
+          echo "$APPLE_CERTIFICATE_P12" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          security import "$RUNNER_TEMP/certificate.p12" -k "$keychain" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security list-keychains -d user -s "$keychain"
+          security set-key-partition-list -S apple-tool:,apple: -s -k actions "$keychain"
+          binary="target/${{ matrix.target }}/release/dual"
+          codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$binary"
+          zip -j "$RUNNER_TEMP/dual-notarize.zip" "$binary"
+          xcrun notarytool submit "$RUNNER_TEMP/dual-notarize.zip" \
+            --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_PASSWORD" --wait
+
+      - name: Sign Windows binary
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE_PFX: ${{ secrets.WINDOWS_CERTIFICATE_PFX }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          if ([string]::IsNullOrEmpty($env:WINDOWS_CERTIFICATE_PFX)) {
+            Write-Host "Windows signing credentials are not configured; publishing an unsigned binary."
+            exit 0
+          }
+          $certificate = Join-Path $env:RUNNER_TEMP "dual-signing.pfx"
+          [IO.File]::WriteAllBytes($certificate, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_PFX))
+          $binary = "target/${{ matrix.target }}/release/dual.exe"
+          & signtool sign /fd SHA256 /td SHA256 /tr http://timestamp.digicert.com `
+            /f $certificate /p $env:WINDOWS_CERTIFICATE_PASSWORD $binary
+
       - name: Package Unix binary
         if: runner.os != 'Windows'
         shell: bash

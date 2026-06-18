@@ -101,6 +101,12 @@ In the pull request:
 GitHub Actions must pass formatting, linting, unit tests, release builds, and
 real environment integration tests.
 
+Release maintainers may configure `APPLE_CERTIFICATE_P12`,
+`APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`,
+`APPLE_TEAM_ID`, `APPLE_APP_PASSWORD`, `WINDOWS_CERTIFICATE_PFX`, and
+`WINDOWS_CERTIFICATE_PASSWORD` as GitHub Actions secrets. When present, the
+release workflow signs macOS and Windows binaries before packaging them.
+
 ## Reporting bugs
 
 Include:

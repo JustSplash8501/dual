@@ -37,6 +37,18 @@ pub fn run_task(root: &Path, backend: &impl Backend, name: &str) -> Result<()> {
     backend.run(name)
 }
 
+pub fn list_tasks(root: &Path) -> Result<()> {
+    let config = Config::load(root)?;
+    if config.tasks.is_empty() {
+        println!("No tasks are configured.");
+    } else {
+        for (name, command) in config.tasks {
+            println!("{name}\t{command}");
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;

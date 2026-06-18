@@ -29,6 +29,9 @@ pub struct BridgeReport {
 pub trait Backend {
     fn is_available(&self) -> bool;
     fn ensure_available(&self) -> Result<()>;
+    fn update_engine(&self) -> Result<()>;
+    fn uninstall_engine(&self) -> Result<bool>;
+    fn migrate_lock(&self) -> Result<bool>;
     fn environment_exists(&self) -> bool;
     fn init_or_update(&self, config: &Config, refresh: bool) -> Result<()>;
     fn validate(&self, config: &Config) -> Result<()>;

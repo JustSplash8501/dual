@@ -1,0 +1,43 @@
+name: Bug report
+description: Report a reproducible problem with dual.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened?
+      description: Describe the expected and actual behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Include a minimal dual.toml and the commands needed to reproduce the problem.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: dual doctor output
+      description: Remove credentials or private package URLs before pasting.
+      render: text
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: dual version
+      placeholder: dual 0.1.0
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Operating system and architecture
+      placeholder: Windows 11 x86-64, macOS arm64, Ubuntu x86-64
+    validations:
+      required: true

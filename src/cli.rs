@@ -41,6 +41,17 @@ pub enum Commands {
         packages: Vec<String>,
     },
 
+    /// Remove packages from dual.toml.
+    Remove {
+        /// Package ecosystem: r or py.
+        #[arg(value_enum)]
+        language: Language,
+
+        /// One or more package names.
+        #[arg(required = true, num_args = 1..)]
+        packages: Vec<String>,
+    },
+
     /// Create or update the project environment.
     Up {
         /// Re-resolve dependencies and update dual.lock.
@@ -52,6 +63,24 @@ pub enum Commands {
     Run {
         /// Task name from [tasks] in dual.toml.
         task: String,
+    },
+
+    /// Inspect configured tasks.
+    Task {
+        #[command(subcommand)]
+        command: TaskCommand,
+    },
+
+    /// Manage dual's private environment support.
+    Engine {
+        #[command(subcommand)]
+        command: EngineCommand,
+    },
+
+    /// Manage the dual lockfile.
+    Lock {
+        #[command(subcommand)]
+        command: LockCommand,
     },
 
     /// Open an interactive shell inside the project environment.
@@ -66,6 +95,27 @@ pub enum Commands {
         #[arg(long, short = 'y')]
         yes: bool,
     },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum TaskCommand {
+    /// List configured tasks.
+    List,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum EngineCommand {
+    /// Download and activate the currently pinned engine version.
+    Update,
+
+    /// Remove dual's private engine installation.
+    Uninstall,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum LockCommand {
+    /// Rewrite dual.lock using the current lockfile format.
+    Migrate,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]

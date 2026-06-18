@@ -481,6 +481,38 @@ impl Backend for EnvironmentBackend {
         self.install_engine()
     }
 
+    fn update_engine(&self) -> Result<()> {
+        println!("Updating environment support...");
+        fs::create_dir_all(self.engine_home().join("bin"))?;
+        self.download_engine()?;
+        println!("✓ Environment support updated to {ENGINE_VERSION}");
+        Ok(())
+    }
+
+    fn uninstall_engine(&self) -> Result<bool> {
+        let home = self.engine_home();
+        if !home.exists() {
+            return Ok(false);
+        }
+        fs::remove_dir_all(home)?;
+        Ok(true)
+    }
+
+    fn migrate_lock(&self) -> Result<bool> {
+        let path = self.public_lock_path();
+        if !path.is_file() {
+            anyhow::bail!("dual.lock was not found. Run `dual up` first.");
+        }
+        let contents = fs::read_to_string(&path)?;
+        let lock = read_dual_lock(&path)?;
+        let current = serde_json::to_string_pretty(&lock)? + "\n";
+        if contents == current {
+            return Ok(false);
+        }
+        write_dual_lock(&path, &lock)?;
+        Ok(true)
+    }
+
     fn environment_exists(&self) -> bool {
         self.ready_path().is_file() && self.manifest_path().is_file()
     }

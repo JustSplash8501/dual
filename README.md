@@ -91,12 +91,18 @@ conda-forge.
 dual init [--force] [--name NAME]  Create dual.toml and project directories
 dual add r PACKAGE...              Add R packages
 dual add py PACKAGE...             Add Python packages
+dual remove r PACKAGE...           Remove R packages
+dual remove py PACKAGE...          Remove Python packages
 dual up                            Create or update the environment
 dual up --refresh                  Re-resolve and update the shared lockfile
 dual run TASK                      Run a configured task
+dual task list                     List configured tasks
 dual shell                         Open a shell in the environment
 dual doctor                        Diagnose the project
 dual clean [--yes]                 Remove dual-generated environment files
+dual engine update                 Update private environment support
+dual engine uninstall              Remove private environment support
+dual lock migrate                  Upgrade dual.lock to the current format
 ```
 
 Pass `--verbose` before or after a command to show additional environment
@@ -124,6 +130,11 @@ Download the archive for your platform from GitHub Releases, verify it against
 Release archives are produced for Linux x86-64, macOS Apple Silicon, macOS
 Intel, and Windows x86-64. GitHub build-provenance attestations are published
 for every archive.
+
+Release signing is enabled when maintainers configure the Apple and Windows
+signing secrets documented in `CONTRIBUTING.md`. Without those optional
+credentials, releases still include SHA-256 checksums and GitHub provenance
+attestations.
 
 ### Build from source
 
