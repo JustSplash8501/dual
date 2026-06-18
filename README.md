@@ -209,6 +209,11 @@ support, or special Quarto behavior. Quarto works like any other task command.
 The goal is a small, legible foundation that makes ordinary scientific
 projects easy to reproduce.
 
+## Contributing
+
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for development setup, required
+checks, real environment integration tests, and pull request guidance.
+
 ## License
 
 MIT
