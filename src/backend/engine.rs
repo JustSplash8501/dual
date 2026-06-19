@@ -712,7 +712,7 @@ impl Backend for EnvironmentBackend {
     }
 
     fn validate(&self, config: &Config) -> Result<()> {
-        if !self.run_check(&["Rscript", "--vanilla", "--version"]) {
+        if !self.run_check(&["Rscript", "--vanilla", "-e", "quit(status=0)"]) {
             anyhow::bail!("R could not start inside the project environment.");
         }
         if !self.run_check(&["python", "-I", "--version"]) {
@@ -821,7 +821,7 @@ impl Backend for EnvironmentBackend {
             });
         }
 
-        let r_available = self.run_check(&["Rscript", "--vanilla", "--version"]);
+        let r_available = self.run_check(&["Rscript", "--vanilla", "-e", "quit(status=0)"]);
         let python_available = self.run_check(&["python", "-I", "--version"]);
         let missing_r_packages = if r_available {
             self.missing_r_packages(&config.r.packages)

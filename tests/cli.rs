@@ -446,6 +446,10 @@ fn r_checks_disable_startup_profiles() {
             line.contains("Rscript --vanilla"),
             "R invocation did not disable startup files: {line}"
         );
+        assert!(
+            !line.contains("Rscript --vanilla --version"),
+            "Rscript treats --version after --vanilla as a missing script: {line}"
+        );
     }
 }
 
