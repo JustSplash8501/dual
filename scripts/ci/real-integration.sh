@@ -20,7 +20,7 @@ pycheck = "python -c \\"import six; print(six.__version__)\\""
 ))
 PY
 
-"$DUAL_BIN" up
+"$DUAL_BIN" --trust-project up
 "$DUAL_BIN" doctor
 "$DUAL_BIN" run rcheck
 "$DUAL_BIN" run pycheck
@@ -28,7 +28,7 @@ test -s dual.lock
 
 mkdir -p scripts/nested
 cd scripts/nested
-"$DUAL_BIN" doctor
+"$DUAL_BIN" --trust-project doctor
 cd ../..
 
 "$DUAL_BIN" clean --yes

@@ -13,6 +13,10 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub verbose: bool,
 
+    /// Trust the current dual.toml and dual.lock to install packages or execute code.
+    #[arg(long, global = true)]
+    pub trust_project: bool,
+
     #[command(subcommand)]
     pub command: Commands,
 }

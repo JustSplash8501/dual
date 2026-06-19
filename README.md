@@ -19,7 +19,7 @@ one command-line interface, and one reproducible environment.
 dual init
 dual add r dplyr ggplot2 tidyr
 dual add py pandas scikit-learn
-dual up
+dual --trust-project up
 dual run analysis
 ```
 
@@ -105,6 +105,30 @@ dual engine uninstall              Remove private environment support
 dual lock migrate                  Upgrade dual.lock to the current format
 ```
 
+Commands that install packages or execute project code require explicit
+repository trust on first use:
+
+```sh
+dual --trust-project up
+```
+
+Trust is tied to the canonical project path and the contents of all project
+files except `.git/`, `.dual/`, and Dual's data directory when it is inside the
+project. Changing scripts, configuration, lockfiles, data, or other task inputs
+requires reviewing and trusting the project again. Symbolic links and special
+files are rejected in trusted projects. CI can set `DUAL_TRUST_PROJECT=1` as an
+explicit noninteractive authorization.
+
+Treat a Dual project like source code: package installation, lockfile contents,
+configured tasks, and interactive shells can execute code with your user
+permissions. Dual rejects symbolic links for its configuration and generated
+state paths, and it should not be run with elevated privileges.
+
+Environment preparation removes common cloud, registry, and SSH credential
+variables before invoking package tooling. Projects that intentionally require
+private package credentials can set `DUAL_ALLOW_CREDENTIALS=1` after reviewing
+the package sources and build backends.
+
 Pass `--verbose` before or after a command to show additional environment
 progress:
 
@@ -167,8 +191,8 @@ workflow publishes a consolidated `SHA256SUMS` file and GitHub provenance
 attestations:
 
 ```console
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.1.1
+git push origin v0.1.1
 ```
 
 ## Mixed R/Python example
@@ -178,7 +202,7 @@ task, and a `dual.toml` that installs both languages. Try it after building:
 
 ```console
 cd examples/basic-mixed
-../../target/release/dual up
+../../target/release/dual --trust-project up
 ../../target/release/dual doctor
 ../../target/release/dual run analysis
 ../../target/release/dual run model

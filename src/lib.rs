@@ -4,4 +4,5 @@ pub mod config;
 pub mod doctor;
 pub mod errors;
 pub mod platform;
+pub mod security;
 pub mod tasks;

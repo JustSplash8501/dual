@@ -247,6 +247,226 @@ fn clean_does_not_remove_user_files() {
 
 #[cfg(unix)]
 #[test]
+fn add_rejects_a_symlinked_config() {
+    use std::os::unix::fs::symlink;
+
+    let directory = tempdir().unwrap();
+    let outside = directory.path().join("outside.toml");
+    fs::write(&outside, dual::config::DEFAULT_CONFIG).unwrap();
+    let project = directory.path().join("project");
+    fs::create_dir(&project).unwrap();
+    symlink(&outside, project.join("dual.toml")).unwrap();
+
+    Command::cargo_bin("dual")
+        .unwrap()
+        .current_dir(&project)
+        .args(["add", "py", "requests"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("must not be a symbolic link"));
+
+    assert_eq!(
+        fs::read_to_string(outside).unwrap(),
+        dual::config::DEFAULT_CONFIG
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn up_rejects_a_symlinked_state_directory() {
+    use std::os::unix::fs::symlink;
+
+    let fixture = backend_fixture();
+    let outside = fixture.project.path().join("outside-state");
+    fs::create_dir(&outside).unwrap();
+    symlink(&outside, fixture.project.path().join(".dual")).unwrap();
+
+    dual_command(&fixture)
+        .arg("up")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("must not be a symbolic link"));
+
+    assert!(fs::read_dir(outside).unwrap().next().is_none());
+}
+
+#[cfg(unix)]
+#[test]
+fn execution_requires_trust_and_config_changes_invalidate_it() {
+    let fixture = backend_fixture();
+    let home = fixture.project.path().join("trust-home");
+
+    untrusted_dual_command(&fixture, &home)
+        .arg("up")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("project is not trusted"));
+
+    untrusted_dual_command(&fixture, &home)
+        .args(["--trust-project", "up"])
+        .assert()
+        .success();
+
+    let config_path = fixture.project.path().join("dual.toml");
+    fs::write(
+        &config_path,
+        fs::read_to_string(&config_path)
+            .unwrap()
+            .replace("name = \"my-project\"", "name = \"changed\""),
+    )
+    .unwrap();
+
+    untrusted_dual_command(&fixture, &home)
+        .arg("up")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("project files changed"));
+}
+
+#[cfg(unix)]
+#[test]
+fn script_changes_invalidate_project_trust() {
+    let fixture = backend_fixture();
+    let home = fixture.engine.parent().unwrap().join("script-trust-home");
+    let config_path = fixture.project.path().join("dual.toml");
+    fs::write(
+        &config_path,
+        fs::read_to_string(&config_path).unwrap().replace(
+            "[tasks]\n",
+            "[tasks]\nanalysis = \"python scripts/analysis.py\"\n",
+        ),
+    )
+    .unwrap();
+    fs::write(
+        fixture.project.path().join("scripts/analysis.py"),
+        "print('safe')\n",
+    )
+    .unwrap();
+
+    untrusted_dual_command(&fixture, &home)
+        .args(["--trust-project", "up"])
+        .assert()
+        .success();
+
+    fs::write(
+        fixture.project.path().join("scripts/analysis.py"),
+        "print('changed')\n",
+    )
+    .unwrap();
+
+    untrusted_dual_command(&fixture, &home)
+        .args(["run", "analysis"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("project is not trusted"));
+}
+
+#[cfg(unix)]
+#[test]
+fn tampered_generated_manifest_is_rejected() {
+    let fixture = backend_fixture();
+    dual_command(&fixture).arg("up").assert().success();
+
+    let manifest = fixture
+        .project
+        .path()
+        .join(".dual/workspace/pyproject.toml");
+    fs::write(
+        &manifest,
+        fs::read_to_string(&manifest)
+            .unwrap()
+            .replace("cmd = ", "cmd = \"touch exploited\" # "),
+    )
+    .unwrap();
+
+    dual_command(&fixture)
+        .args(["run", "missing"])
+        .assert()
+        .failure();
+
+    let config_path = fixture.project.path().join("dual.toml");
+    fs::write(
+        &config_path,
+        fs::read_to_string(&config_path)
+            .unwrap()
+            .replace("[tasks]\n", "[tasks]\nanalysis = \"echo safe\"\n"),
+    )
+    .unwrap();
+    dual_command(&fixture)
+        .args(["--trust-project", "run", "analysis"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "generated environment manifest does not match",
+        ));
+}
+
+#[cfg(unix)]
+#[test]
+fn execution_time_project_mutation_is_not_trusted() {
+    let fixture = backend_fixture();
+    let home = fixture.engine.parent().unwrap().join("mutation-trust-home");
+
+    untrusted_dual_command(&fixture, &home)
+        .env("DUAL_ENGINE_MUTATE_CONFIG", "1")
+        .args(["--trust-project", "up"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "Project files changed while code was executing",
+        ));
+
+    untrusted_dual_command(&fixture, &home)
+        .arg("up")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("project is not trusted"));
+}
+
+#[cfg(unix)]
+#[test]
+fn shell_requires_a_complete_environment() {
+    let fixture = backend_fixture();
+    dual_command(&fixture)
+        .arg("shell")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("environment has not been created"));
+}
+
+#[cfg(unix)]
+#[test]
+fn r_checks_disable_startup_profiles() {
+    let fixture = backend_fixture();
+    dual_command(&fixture).arg("up").assert().success();
+
+    let log = fs::read_to_string(&fixture.log).unwrap();
+    for line in log.lines().filter(|line| line.contains("Rscript")) {
+        assert!(
+            line.contains("Rscript --vanilla"),
+            "R invocation did not disable startup files: {line}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn environment_preparation_does_not_inherit_common_credentials() {
+    let fixture = backend_fixture();
+    let credential_log = fixture.engine.parent().unwrap().join("credential-leak");
+
+    dual_command(&fixture)
+        .env("GITHUB_TOKEN", "top-secret")
+        .env("DUAL_ENGINE_CREDENTIAL_LOG", &credential_log)
+        .arg("up")
+        .assert()
+        .success();
+
+    assert!(!credential_log.exists());
+}
+
+#[cfg(unix)]
+#[test]
 fn up_enforces_an_existing_shared_lockfile() {
     let fixture = backend_fixture();
     write_test_lock(fixture.project.path(), "shared lock");
@@ -379,15 +599,7 @@ fn run_prints_task_output() {
     )
     .unwrap();
     fs::create_dir_all(fixture.project.path().join(".dual/workspace")).unwrap();
-    fs::write(
-        fixture
-            .project
-            .path()
-            .join(".dual/workspace/pyproject.toml"),
-        "# This file is generated by dual.\n# Edit dual.toml instead.\n",
-    )
-    .unwrap();
-    fs::write(fixture.project.path().join(".dual/ready"), "ready").unwrap();
+    write_ready_environment(fixture.project.path());
     write_test_lock(fixture.project.path(), "lock");
 
     dual_command(&fixture)
@@ -410,15 +622,7 @@ fn failed_task_preserves_useful_stderr_without_engine_branding() {
     )
     .unwrap();
     fs::create_dir_all(fixture.project.path().join(".dual/workspace")).unwrap();
-    fs::write(
-        fixture
-            .project
-            .path()
-            .join(".dual/workspace/pyproject.toml"),
-        "# This file is generated by dual.\n# Edit dual.toml instead.\n",
-    )
-    .unwrap();
-    fs::write(fixture.project.path().join(".dual/ready"), "ready").unwrap();
+    write_ready_environment(fixture.project.path());
     write_test_lock(fixture.project.path(), "lock");
 
     dual_command(&fixture)
@@ -436,7 +640,7 @@ fn failed_task_preserves_useful_stderr_without_engine_branding() {
 #[test]
 fn up_automatically_installs_private_environment_support() {
     let fixture = backend_fixture();
-    let home = fixture.project.path().join("dual-home");
+    let home = fixture.engine.parent().unwrap().join("dual-home");
     let download_url = format!("file://{}", fixture.engine.display());
     let checksum = sha256(&fs::read(&fixture.engine).unwrap());
 
@@ -448,6 +652,7 @@ fn up_automatically_installs_private_environment_support() {
         .env("DUAL_ENGINE_DOWNLOAD_URL", download_url)
         .env("DUAL_ENGINE_SHA256", checksum)
         .env("DUAL_ENGINE_LOG", &fixture.log)
+        .env("DUAL_TRUST_PROJECT", "1")
         .arg("up")
         .assert()
         .success()
@@ -472,6 +677,7 @@ fn automatic_install_failure_has_a_user_facing_error() {
         .current_dir(directory.path())
         .env("DUAL_HOME", &home)
         .env("DUAL_ENGINE_DISABLE_PATH_FALLBACK", "1")
+        .env("DUAL_TRUST_PROJECT", "1")
         .env(
             "DUAL_ENGINE_DOWNLOAD_URL",
             "file:///definitely/missing/dual-engine",
@@ -496,6 +702,7 @@ fn automatic_install_rejects_a_bad_checksum() {
         .current_dir(fixture.project.path())
         .env("DUAL_HOME", &home)
         .env("DUAL_ENGINE_DISABLE_PATH_FALLBACK", "1")
+        .env("DUAL_TRUST_PROJECT", "1")
         .env(
             "DUAL_ENGINE_DOWNLOAD_URL",
             format!("file://{}", fixture.engine.display()),
@@ -507,6 +714,49 @@ fn automatic_install_rejects_a_bad_checksum() {
         .stderr(predicate::str::contains("failed its integrity check"));
 
     assert!(!home.join("engine/bin/dual-engine").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn managed_engine_is_reverified_before_execution() {
+    let fixture = backend_fixture();
+    let home = fixture
+        .engine
+        .parent()
+        .unwrap()
+        .join("verified-engine-home");
+    let checksum = sha256(&fs::read(&fixture.engine).unwrap());
+
+    Command::cargo_bin("dual")
+        .unwrap()
+        .current_dir(fixture.project.path())
+        .env("DUAL_HOME", &home)
+        .env("DUAL_ENGINE_DISABLE_PATH_FALLBACK", "1")
+        .env(
+            "DUAL_ENGINE_DOWNLOAD_URL",
+            format!("file://{}", fixture.engine.display()),
+        )
+        .env("DUAL_ENGINE_SHA256", &checksum)
+        .env("DUAL_ENGINE_LOG", &fixture.log)
+        .env("DUAL_TRUST_PROJECT", "1")
+        .arg("up")
+        .assert()
+        .success();
+
+    let managed = home.join("engine/bin/dual-engine");
+    fs::write(&managed, b"tampered").unwrap();
+
+    Command::cargo_bin("dual")
+        .unwrap()
+        .current_dir(fixture.project.path())
+        .env("DUAL_HOME", &home)
+        .env("DUAL_ENGINE_DISABLE_PATH_FALLBACK", "1")
+        .env("DUAL_ENGINE_SHA256", checksum)
+        .env("DUAL_TRUST_PROJECT", "1")
+        .arg("up")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("failed its integrity check"));
 }
 
 #[cfg(unix)]
@@ -592,6 +842,14 @@ fn write_test_lock(project: &std::path::Path, environment: &str) {
     .unwrap();
 }
 
+fn write_ready_environment(project: &std::path::Path) {
+    let config = dual::config::Config::load(project).unwrap();
+    let manifest = dual::backend::generate_manifest(&config).unwrap();
+    fs::create_dir_all(project.join(".dual/workspace")).unwrap();
+    fs::write(project.join(".dual/workspace/pyproject.toml"), manifest).unwrap();
+    fs::write(project.join(".dual/ready"), "ready").unwrap();
+}
+
 #[cfg(unix)]
 struct BackendFixture {
     project: tempfile::TempDir,
@@ -606,7 +864,7 @@ fn backend_fixture() -> BackendFixture {
 
     let project = initialized_project();
     let bin = tempdir().unwrap();
-    let log = project.path().join("engine-calls.log");
+    let log = bin.path().join("engine-calls.log");
     let engine = bin.path().join("dual-engine");
     fs::write(
         &engine,
@@ -625,11 +883,17 @@ for argument in "$@"; do
   previous="$argument"
 done
 if [ "$command_name" = "install" ]; then
+  if [ -n "${GITHUB_TOKEN:-}" ] && [ -n "${DUAL_ENGINE_CREDENTIAL_LOG:-}" ]; then
+    printf '%s\n' "$GITHUB_TOKEN" > "$DUAL_ENGINE_CREDENTIAL_LOG"
+  fi
   if [ "${DUAL_ENGINE_FAIL_LOCKED:-0}" = "1" ] && printf '%s\n' "$*" | grep -q -- '--locked'; then
     exit 1
   fi
   mkdir -p "$(dirname "$manifest")"
   printf 'version: 6\n' > "$(dirname "$manifest")/pixi.lock"
+  if [ "${DUAL_ENGINE_MUTATE_CONFIG:-0}" = "1" ] && ! grep -q '^evil =' dual.toml; then
+    printf '%s\n' 'evil = "echo injected"' >> dual.toml
+  fi
   exit 0
 fi
 if [ "$command_name" = "run" ]; then
@@ -671,6 +935,20 @@ fn dual_command(fixture: &BackendFixture) -> Command {
     command
         .current_dir(fixture.project.path())
         .env("DUAL_ENGINE_PATH", &fixture.engine)
-        .env("DUAL_ENGINE_LOG", &fixture.log);
+        .env("DUAL_ENGINE_LOG", &fixture.log)
+        .env("DUAL_HOME", fixture.project.path().join("dual-home"))
+        .env("DUAL_TRUST_PROJECT", "1");
+    command
+}
+
+#[cfg(unix)]
+fn untrusted_dual_command(fixture: &BackendFixture, home: &std::path::Path) -> Command {
+    let mut command = Command::cargo_bin("dual").unwrap();
+    command
+        .current_dir(fixture.project.path())
+        .env("DUAL_ENGINE_PATH", &fixture.engine)
+        .env("DUAL_ENGINE_LOG", &fixture.log)
+        .env("DUAL_HOME", home)
+        .env_remove("DUAL_TRUST_PROJECT");
     command
 }

@@ -18,7 +18,7 @@ pycheck = 'python -c "import six; print(six.__version__)"'
 $config = $config.Replace("[tasks]", $tasks.Trim())
 Set-Content dual.toml $config
 
-& $env:DUAL_BIN up
+& $env:DUAL_BIN --trust-project up
 & $env:DUAL_BIN doctor
 & $env:DUAL_BIN run rcheck
 & $env:DUAL_BIN run pycheck
@@ -26,7 +26,7 @@ if (-not (Test-Path dual.lock)) { throw "dual.lock was not created" }
 
 New-Item -ItemType Directory -Path scripts/nested -Force | Out-Null
 Set-Location scripts/nested
-& $env:DUAL_BIN doctor
+& $env:DUAL_BIN --trust-project doctor
 Set-Location ../..
 
 & $env:DUAL_BIN clean --yes

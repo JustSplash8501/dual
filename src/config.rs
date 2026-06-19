@@ -1,12 +1,15 @@
 use std::collections::BTreeMap;
-use std::fs;
 use std::path::{Path, PathBuf};
+
+#[cfg(test)]
+use std::fs;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use toml_edit::{Array, DocumentMut, Item, Value};
 
 use crate::errors::DualError;
+use crate::security::{self, MAX_CONFIG_BYTES};
 
 pub const DEFAULT_CONFIG: &str = r#"[project]
 name = "my-project"
@@ -79,7 +82,7 @@ impl Config {
             .into());
         }
 
-        let contents = fs::read_to_string(path)
+        let contents = security::read_text_file(path, MAX_CONFIG_BYTES, "dual.toml")
             .with_context(|| format!("could not read {}", path.display()))?;
         let config: Self = toml::from_str(&contents)
             .map_err(|error| DualError::InvalidConfig(error.to_string()))?;
@@ -91,6 +94,7 @@ impl Config {
         if self.project.name.trim().is_empty() {
             return Err(DualError::InvalidConfig("project.name cannot be empty".into()).into());
         }
+        reject_control_characters("project.name", &self.project.name)?;
         validate_language("r", &self.r)?;
         validate_language("python", &self.python)?;
         for (name, command) in &self.tasks {
@@ -105,6 +109,8 @@ impl Config {
                     DualError::InvalidConfig("task names cannot start with `-`".into()).into(),
                 );
             }
+            reject_control_characters("task name", name)?;
+            reject_control_characters("task command", command)?;
         }
         Ok(())
     }
@@ -126,7 +132,7 @@ impl Config {
 
         // Validate the current file before editing it.
         Self::from_path(path)?;
-        let contents = fs::read_to_string(path)?;
+        let contents = security::read_text_file(path, MAX_CONFIG_BYTES, "dual.toml")?;
         let mut document = contents
             .parse::<DocumentMut>()
             .map_err(|error| DualError::InvalidConfig(error.to_string()))?;
@@ -158,7 +164,7 @@ impl Config {
             replacement.push(package);
         }
         *array = replacement;
-        fs::write(path, document.to_string())?;
+        security::write_file_atomic(path, document.to_string().as_bytes(), "dual.toml")?;
 
         // Ensure the edit still yields a valid typed configuration.
         Self::from_path(path)?;
@@ -170,7 +176,7 @@ impl Config {
             anyhow::bail!("provide at least one package name");
         }
         Self::from_path(path)?;
-        let contents = fs::read_to_string(path)?;
+        let contents = security::read_text_file(path, MAX_CONFIG_BYTES, "dual.toml")?;
         let mut document = contents
             .parse::<DocumentMut>()
             .map_err(|error| DualError::InvalidConfig(error.to_string()))?;
@@ -198,7 +204,7 @@ impl Config {
             replacement.push(package);
         }
         *array = replacement;
-        fs::write(path, document.to_string())?;
+        security::write_file_atomic(path, document.to_string().as_bytes(), "dual.toml")?;
         Self::from_path(path)?;
         Ok(removed)
     }
@@ -207,6 +213,13 @@ impl Config {
 fn validate_language(name: &str, language: &LanguageConfig) -> Result<()> {
     if language.version.trim().is_empty() {
         return Err(DualError::InvalidConfig(format!("{name}.version cannot be empty")).into());
+    }
+    reject_control_characters(&format!("{name}.version"), &language.version)?;
+    if !valid_version_specifier(&language.version) {
+        return Err(DualError::InvalidConfig(format!(
+            "{name}.version contains unsupported characters"
+        ))
+        .into());
     }
     if let Some(package) = language.packages.iter().find(|package| {
         if name == "r" {
@@ -219,6 +232,15 @@ fn validate_language(name: &str, language: &LanguageConfig) -> Result<()> {
             "{name}.packages contains an invalid package name: {package:?}"
         ))
         .into());
+    }
+    Ok(())
+}
+
+fn reject_control_characters(field: &str, value: &str) -> Result<()> {
+    if security::contains_control_characters(value) {
+        return Err(
+            DualError::InvalidConfig(format!("{field} cannot contain control characters")).into(),
+        );
     }
     Ok(())
 }
@@ -329,9 +351,13 @@ fn valid_r_package_reference(package: &str) -> bool {
 fn valid_package_name(package: &str) -> bool {
     !package.trim().is_empty()
         && !package.starts_with('-')
-        && !package
-            .chars()
-            .any(|character| matches!(character, '\'' | '"' | '\n' | '\r'))
+        && package.chars().all(|character| {
+            character.is_ascii_alphanumeric()
+                || matches!(
+                    character,
+                    '.' | '_' | '-' | ':' | '/' | '@' | '#' | '?' | '=' | '&' | '+' | '%' | '~'
+                )
+        })
 }
 
 #[cfg(test)]
@@ -360,6 +386,32 @@ mod tests {
         let invalid = DEFAULT_CONFIG.replace("my-project", "");
         let config: Config = toml::from_str(&invalid).unwrap();
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_control_characters() {
+        let mut config: Config = toml::from_str(DEFAULT_CONFIG).unwrap();
+        config.project.name = "unsafe\u{1b}[2J".into();
+        assert!(config.validate().is_err());
+
+        let mut config: Config = toml::from_str(DEFAULT_CONFIG).unwrap();
+        config.project.name = "safe\u{202e}gpj.exe".into();
+        assert!(config.validate().is_err());
+
+        let mut config: Config = toml::from_str(DEFAULT_CONFIG).unwrap();
+        config
+            .tasks
+            .insert("unsafe".into(), "echo\u{7}danger".into());
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_oversized_config_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("dual.toml");
+        fs::write(&path, vec![b' '; security::MAX_CONFIG_BYTES as usize + 1]).unwrap();
+        let error = Config::from_path(&path).unwrap_err();
+        assert!(format!("{error:#}").contains("safety limit"));
     }
 
     #[test]

@@ -5,6 +5,7 @@ use anyhow::Result;
 use crate::backend::Backend;
 use crate::config::Config;
 use crate::errors::DualError;
+use crate::security;
 
 pub fn lookup<'a>(config: &'a Config, name: &str) -> Result<&'a str> {
     config.tasks.get(name).map(String::as_str).ok_or_else(|| {
@@ -24,17 +25,25 @@ pub fn lookup<'a>(config: &'a Config, name: &str) -> Result<&'a str> {
     })
 }
 
-pub fn run_task(root: &Path, backend: &impl Backend, name: &str) -> Result<()> {
+pub fn run_task(
+    root: &Path,
+    backend: &impl Backend,
+    name: &str,
+    trust_project: bool,
+) -> Result<()> {
     let config = Config::load(root)?;
     lookup(&config, name)?;
 
     if !backend.environment_exists() {
         anyhow::bail!("The project environment has not been created. Run `dual up` first.");
     }
+    let trust = security::ensure_project_trusted(root, trust_project)?;
     backend.ensure_available()?;
+    backend.verify_manifest(&config)?;
+    security::verify_project_unchanged(root, &trust)?;
 
     println!("Running task `{name}`...");
-    backend.run(name)
+    backend.run(&config, name)
 }
 
 pub fn list_tasks(root: &Path) -> Result<()> {
