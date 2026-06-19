@@ -105,6 +105,10 @@ dual engine uninstall              Remove private environment support
 dual lock migrate                  Upgrade dual.lock to the current format
 ```
 
+When `PROJECT_NAME` is omitted, `dual init` uses the current directory name.
+Project names must start and end with a letter or number and may contain only
+ASCII letters, numbers, hyphens, and underscores.
+
 Commands that install packages or execute project code require explicit
 repository trust on first use:
 
@@ -247,7 +251,10 @@ R 4.6.0 restarted.
 ```
 
 The R version line is produced by the editor from the actual configured
-interpreter; Dual produces only the project-loaded line.
+interpreter; Dual produces only the project-loaded line. Dual preserves the
+usual R startup behavior by loading the project's `.Rprofile`, or the user's
+`~/.Rprofile` when the project does not provide one, before printing its
+banner. This allows tools such as `renv` to continue activating normally.
 
 ## Scope
 

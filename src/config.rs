@@ -91,10 +91,8 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<()> {
-        if self.project.name.trim().is_empty() {
-            return Err(DualError::InvalidConfig("project.name cannot be empty".into()).into());
-        }
-        reject_control_characters("project.name", &self.project.name)?;
+        validate_project_name(&self.project.name)
+            .map_err(|error| DualError::InvalidConfig(error.to_string()))?;
         validate_language("r", &self.r)?;
         validate_language("python", &self.python)?;
         for (name, command) in &self.tasks {
@@ -208,6 +206,27 @@ impl Config {
         Self::from_path(path)?;
         Ok(removed)
     }
+}
+
+pub fn validate_project_name(name: &str) -> Result<()> {
+    let valid = !name.is_empty()
+        && name
+            .chars()
+            .next()
+            .is_some_and(|character| character.is_ascii_alphanumeric())
+        && name
+            .chars()
+            .last()
+            .is_some_and(|character| character.is_ascii_alphanumeric())
+        && name
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'));
+    if !valid {
+        anyhow::bail!(
+            "project name must start and end with a letter or number and contain only ASCII letters, numbers, `-`, or `_`"
+        );
+    }
+    Ok(())
 }
 
 fn validate_language(name: &str, language: &LanguageConfig) -> Result<()> {
@@ -386,6 +405,15 @@ mod tests {
         let invalid = DEFAULT_CONFIG.replace("my-project", "");
         let config: Config = toml::from_str(&invalid).unwrap();
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_unsafe_project_names() {
+        for name in ["has spaces", "café", "-leading", "trailing-", "dot.name"] {
+            let mut config: Config = toml::from_str(DEFAULT_CONFIG).unwrap();
+            config.project.name = name.into();
+            assert!(config.validate().is_err(), "accepted {name:?}");
+        }
     }
 
     #[test]

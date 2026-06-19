@@ -2,7 +2,7 @@ use anyhow::Result;
 use clap::Parser;
 use dual::backend::{Backend, EnvironmentBackend};
 use dual::cli::{Cli, Commands, EngineCommand, Language, LockCommand, TaskCommand};
-use dual::config::{Config, DEFAULT_CONFIG};
+use dual::config::{validate_project_name, Config, DEFAULT_CONFIG};
 use dual::{doctor, security, tasks};
 
 fn main() {
@@ -94,6 +94,13 @@ fn remove(root: &std::path::Path, language: Language, packages: &[String]) -> Re
 }
 
 fn init(root: &std::path::Path, force: bool, name: Option<&str>) -> Result<()> {
+    let inferred_name = root
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .ok_or_else(|| anyhow::anyhow!("could not infer a project name from this directory"))?;
+    let project_name = name.unwrap_or(inferred_name);
+    validate_project_name(project_name)?;
+
     let path = Config::path(root);
     security::reject_symlink_if_present(&path, "dual.toml")?;
     if path.exists() && !force {
@@ -111,14 +118,6 @@ fn init(root: &std::path::Path, force: bool, name: Option<&str>) -> Result<()> {
             std::fs::remove_file(&lock)?;
         }
         println!("Invalidated the previous environment and lockfile.");
-    }
-
-    let project_name = name.unwrap_or("my-project");
-    if project_name.trim().is_empty() {
-        anyhow::bail!("project name cannot be empty");
-    }
-    if security::contains_control_characters(project_name) {
-        anyhow::bail!("project name cannot contain control characters");
     }
 
     let escaped_name = project_name.replace('\\', "\\\\").replace('"', "\\\"");

@@ -23,6 +23,48 @@ fn init_creates_expected_files() {
 }
 
 #[test]
+fn init_infers_project_name_from_directory() {
+    let parent = tempdir().unwrap();
+    let directory = parent.path().join("inferred-project");
+    fs::create_dir(&directory).unwrap();
+
+    Command::cargo_bin("dual")
+        .unwrap()
+        .current_dir(&directory)
+        .arg("init")
+        .assert()
+        .success();
+
+    let config = fs::read_to_string(directory.join("dual.toml")).unwrap();
+    assert!(config.contains("name = \"inferred-project\""));
+}
+
+#[test]
+fn init_rejects_unsafe_project_names() {
+    let invalid = [
+        "has spaces",
+        "café",
+        "-leading",
+        "trailing-",
+        "slash/name",
+        "dot.name",
+    ];
+    for name in invalid {
+        let directory = tempdir().unwrap();
+        Command::cargo_bin("dual")
+            .unwrap()
+            .current_dir(directory.path())
+            .args(["init", "--", name])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(
+                "project name must start and end with a letter or number",
+            ));
+        assert!(!directory.path().join("dual.toml").exists());
+    }
+}
+
+#[test]
 fn init_does_not_overwrite_existing_config() {
     let directory = tempdir().unwrap();
     let path = directory.path().join("dual.toml");
@@ -31,7 +73,7 @@ fn init_does_not_overwrite_existing_config() {
     Command::cargo_bin("dual")
         .unwrap()
         .current_dir(directory.path())
-        .arg("init")
+        .args(["init", "existing-project"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("already exists"));
@@ -460,6 +502,33 @@ fn shell_uses_the_project_name_prompt() {
 
 #[cfg(unix)]
 #[test]
+fn nested_shells_exit_cleanly_and_remove_staged_state() {
+    let fixture = backend_fixture();
+    dual_command(&fixture).arg("up").assert().success();
+
+    dual_command(&fixture)
+        .env("DUAL_ENGINE_NESTED_SHELL", "1")
+        .env("DUAL_BIN", assert_cmd::cargo::cargo_bin!("dual"))
+        .arg("shell")
+        .assert()
+        .success();
+
+    let log = fs::read_to_string(&fixture.log).unwrap();
+    assert_eq!(
+        log.lines()
+            .filter(|line| line.split_whitespace().any(|part| part == "shell"))
+            .count(),
+        2
+    );
+    assert!(!fixture
+        .project
+        .path()
+        .join(".dual/workspace/pixi.lock")
+        .exists());
+}
+
+#[cfg(unix)]
+#[test]
 fn r_checks_disable_startup_profiles() {
     let fixture = backend_fixture();
     dual_command(&fixture).arg("up").assert().success();
@@ -852,7 +921,7 @@ fn initialized_project() -> tempfile::TempDir {
     Command::cargo_bin("dual")
         .unwrap()
         .current_dir(directory.path())
-        .arg("init")
+        .args(["init", "test-project"])
         .assert()
         .success();
     directory
@@ -939,6 +1008,9 @@ if [ "$command_name" = "run" ]; then
   exit 0
 fi
 if [ "$command_name" = "shell" ]; then
+  if [ "${DUAL_ENGINE_NESTED_SHELL:-0}" = "1" ] && [ "${DUAL_ENGINE_NESTED_GUARD:-0}" != "1" ]; then
+    DUAL_ENGINE_NESTED_GUARD=1 "$DUAL_BIN" shell
+  fi
   exit 0
 fi
 exit 1
