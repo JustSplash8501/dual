@@ -354,7 +354,7 @@ fn execution_requires_trust_and_config_changes_invalidate_it() {
         &config_path,
         fs::read_to_string(&config_path)
             .unwrap()
-            .replace("name = \"my-project\"", "name = \"changed\""),
+            .replace("name = \"test-project\"", "name = \"changed\""),
     )
     .unwrap();
 
