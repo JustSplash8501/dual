@@ -10,6 +10,24 @@
 .env
 .env.*
 !.env.example
+.direnv/
+
+# R session and IDE files
+.Rhistory
+.RData
+.Ruserdata
+.Rproj.user/
+*.Rproj
+
+# Python caches and virtual environments
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
 # Editor and IDE files
 .idea/
@@ -27,6 +45,9 @@ Desktop.ini
 # Test and coverage output
 /.coverage/
 /coverage/
+.coverage
+.coverage.*
+htmlcov/
 *.profraw
 *.profdata
 
