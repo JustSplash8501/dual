@@ -29,9 +29,13 @@ pub enum Commands {
         #[arg(long)]
         force: bool,
 
-        /// Override the project name inferred from the directory.
-        #[arg(long)]
+        /// Project name used in dual.toml and the activated shell prompt.
+        #[arg(value_name = "PROJECT_NAME")]
         name: Option<String>,
+
+        /// Legacy spelling for the project name.
+        #[arg(long = "name", value_name = "PROJECT_NAME", hide = true)]
+        legacy_name: Option<String>,
     },
 
     /// Add packages to dual.toml.

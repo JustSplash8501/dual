@@ -10,7 +10,7 @@ fn init_creates_expected_files() {
     Command::cargo_bin("dual")
         .unwrap()
         .current_dir(directory.path())
-        .args(["init", "--name", "experiment"])
+        .args(["init", "experiment"])
         .assert()
         .success()
         .stdout(predicate::str::contains("Created dual.toml"));
@@ -48,7 +48,7 @@ fn force_init_invalidates_stale_environment_and_lock() {
     Command::cargo_bin("dual")
         .unwrap()
         .current_dir(directory.path())
-        .args(["init", "--force", "--name", "replacement"])
+        .args(["init", "replacement", "--force"])
         .assert()
         .success()
         .stdout(predicate::str::contains(
@@ -432,6 +432,30 @@ fn shell_requires_a_complete_environment() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("environment has not been created"));
+}
+
+#[cfg(unix)]
+#[test]
+fn shell_uses_the_project_name_prompt() {
+    let fixture = backend_fixture();
+    dual_command(&fixture).arg("up").assert().success();
+    let profile = fs::read_to_string(fixture.project.path().join(".dual/Rprofile")).unwrap();
+    assert!(profile.contains(&format!(
+        "- Project '%s' loaded. [dual {}]",
+        env!("CARGO_PKG_VERSION")
+    )));
+
+    dual_command(&fixture).arg("shell").assert().success();
+
+    let log = fs::read_to_string(&fixture.log).unwrap();
+    assert!(
+        log.lines().any(|line| {
+            line.contains("shell")
+                && line.contains("--locked")
+                && line.contains("--change-ps1 true")
+        }),
+        "shell did not request the project prompt: {log}"
+    );
 }
 
 #[cfg(unix)]

@@ -26,7 +26,16 @@ fn run() -> Result<()> {
     let backend = EnvironmentBackend::new(&root, cli.verbose);
 
     match cli.command {
-        Commands::Init { force, name } => init(&root, force, name.as_deref()),
+        Commands::Init {
+            force,
+            name,
+            legacy_name,
+        } => {
+            if name.is_some() && legacy_name.is_some() {
+                anyhow::bail!("provide the project name once: `dual init PROJECT_NAME`");
+            }
+            init(&root, force, name.as_deref().or(legacy_name.as_deref()))
+        }
         Commands::Add { language, packages } => add(&root, language, &packages),
         Commands::Remove { language, packages } => remove(&root, language, &packages),
         Commands::Up { refresh } => up(&root, &backend, refresh, cli.trust_project),
@@ -105,6 +114,9 @@ fn init(root: &std::path::Path, force: bool, name: Option<&str>) -> Result<()> {
     }
 
     let project_name = name.unwrap_or("my-project");
+    if project_name.trim().is_empty() {
+        anyhow::bail!("project name cannot be empty");
+    }
     if security::contains_control_characters(project_name) {
         anyhow::bail!("project name cannot contain control characters");
     }

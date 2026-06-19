@@ -16,7 +16,7 @@ one command-line interface, and one reproducible environment.
 ## Quickstart
 
 ```console
-dual init
+dual init cli-tools
 dual add r dplyr ggplot2 tidyr
 dual add py pandas scikit-learn
 dual --trust-project up
@@ -88,7 +88,7 @@ conda-forge.
 ## Commands
 
 ```text
-dual init [--force] [--name NAME]  Create dual.toml and project directories
+dual init [PROJECT_NAME] [--force]  Create dual.toml and project directories
 dual add r PACKAGE...              Add R packages
 dual add py PACKAGE...             Add Python packages
 dual remove r PACKAGE...           Remove R packages
@@ -237,9 +237,17 @@ dependencies. Commit the updated `dual.toml` and `dual.lock` together.
 The CLI targets Linux, macOS Intel, macOS Apple Silicon, and Windows 10/11.
 Generated environments declare `linux-64`, `osx-64`, `osx-arm64`, and
 `win-64`. Commands run through the project environment instead of assuming a
-global R, Python, shell, or `.venv` layout. On Unix, `dual shell` uses the
-user's configured shell; on Windows it uses the configured command processor
-or PowerShell.
+global R, Python, shell, or `.venv` layout. `dual shell` opens an activated
+shell whose prompt is prefixed with the project name, such as `(cli-tools)`.
+Interactive R sessions also identify the loaded project and Dual version:
+
+```text
+R 4.6.0 restarted.
+- Project '~/path/to/cli-tools' loaded. [dual 0.1.1]
+```
+
+The R version line is produced by the editor from the actual configured
+interpreter; Dual produces only the project-loaded line.
 
 ## Scope
 
