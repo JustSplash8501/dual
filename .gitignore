@@ -45,6 +45,7 @@ Desktop.ini
 # Test and coverage output
 /.coverage/
 /coverage/
+/dual-e2e-local/
 .coverage
 .coverage.*
 htmlcov/

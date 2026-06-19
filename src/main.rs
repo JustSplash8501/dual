@@ -197,7 +197,8 @@ fn shell(root: &std::path::Path, backend: &impl Backend, trust_project: bool) ->
     backend.ensure_available()?;
     backend.verify_manifest(&config)?;
     security::verify_project_unchanged(root, &trust)?;
-    backend.shell(&config)
+    backend.shell(&config)?;
+    security::verify_project_unchanged(root, &trust)
 }
 
 fn clean(root: &std::path::Path, backend: &impl Backend, yes: bool) -> Result<()> {

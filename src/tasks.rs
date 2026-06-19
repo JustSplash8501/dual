@@ -43,7 +43,8 @@ pub fn run_task(
     security::verify_project_unchanged(root, &trust)?;
 
     println!("Running task `{name}`...");
-    backend.run(&config, name)
+    backend.run(&config, name)?;
+    security::verify_project_unchanged(root, &trust)
 }
 
 pub fn list_tasks(root: &Path) -> Result<()> {

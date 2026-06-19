@@ -117,10 +117,11 @@ dual --trust-project up
 ```
 
 Trust is tied to the canonical project path and the contents of all project
-files except `.git/`, `.dual/`, and Dual's data directory when it is inside the
-project. Changing scripts, configuration, lockfiles, data, or other task inputs
-requires reviewing and trusting the project again. Symbolic links and special
-files are rejected in trusted projects. CI can set `DUAL_TRUST_PROJECT=1` as an
+files except `.git/`, `.dual/`, `results/`, and Dual's data directory when it
+is inside the project. Changing scripts, configuration, lockfiles, data, or
+other task inputs requires reviewing and trusting the project again. Generated
+files under `results/` do not invalidate trust. Symbolic links and special files
+are rejected in trusted projects. CI can set `DUAL_TRUST_PROJECT=1` as an
 explicit noninteractive authorization.
 
 Treat a Dual project like source code: package installation, lockfile contents,

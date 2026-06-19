@@ -236,7 +236,7 @@ fn hash_project_directory(
         let first = relative.components().next();
         if matches!(
             first,
-            Some(Component::Normal(name)) if name == ".git" || name == ".dual"
+            Some(Component::Normal(name)) if name == ".git" || name == ".dual" || name == "results"
         ) || (!include_lock && relative == Path::new("dual.lock"))
             || excluded_dual_home(root, &path)
         {
@@ -298,8 +298,24 @@ fn hash_project_directory(
 }
 
 fn excluded_dual_home(root: &Path, path: &Path) -> bool {
-    let home = default_dual_home();
+    let home = normalize_lexical_path(&default_dual_home());
+    let root = normalize_lexical_path(root);
+    let path = normalize_lexical_path(path);
     home.is_absolute() && home.starts_with(root) && path.starts_with(home)
+}
+
+fn normalize_lexical_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized
 }
 
 fn trust_path(root: &Path) -> Result<PathBuf> {
@@ -406,6 +422,14 @@ mod tests {
     use std::os::unix::ffi::OsStrExt;
 
     use super::*;
+
+    #[test]
+    fn lexical_normalization_resolves_parent_components() {
+        assert_eq!(
+            normalize_lexical_path(Path::new("/project/scripts/../dual-home")),
+            PathBuf::from("/project/dual-home")
+        );
+    }
 
     #[test]
     fn native_non_utf8_paths_do_not_collide_in_trust_hashes() {

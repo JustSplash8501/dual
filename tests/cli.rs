@@ -509,6 +509,10 @@ fn nested_shells_exit_cleanly_and_remove_staged_state() {
     dual_command(&fixture)
         .env("DUAL_ENGINE_NESTED_SHELL", "1")
         .env("DUAL_BIN", assert_cmd::cargo::cargo_bin!("dual"))
+        .env(
+            "DUAL_HOME",
+            fixture.engine.parent().unwrap().join("nested-shell-home"),
+        )
         .arg("shell")
         .assert()
         .success();
@@ -704,7 +708,57 @@ fn run_prints_task_output() {
         .args(["run", "analysis"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("analysis complete"));
+        .stdout(
+            predicate::str::contains("analysis complete")
+                .and(predicate::str::contains("Pixi task").not()),
+        );
+}
+
+#[cfg(unix)]
+#[test]
+fn task_results_do_not_invalidate_trust() {
+    let fixture = backend_fixture();
+    let home = fixture.engine.parent().unwrap().join("results-trust-home");
+    configure_analysis_task(fixture.project.path());
+
+    untrusted_dual_command(&fixture, &home)
+        .args(["--trust-project", "up"])
+        .assert()
+        .success();
+
+    fs::create_dir_all(fixture.project.path().join("results")).unwrap();
+    fs::write(
+        fixture.project.path().join("results/output.json"),
+        "{\"ok\":true}\n",
+    )
+    .unwrap();
+
+    untrusted_dual_command(&fixture, &home)
+        .args(["run", "analysis"])
+        .assert()
+        .success();
+}
+
+#[cfg(unix)]
+#[test]
+fn task_source_mutations_are_rejected_after_execution() {
+    let fixture = backend_fixture();
+    let home = fixture.engine.parent().unwrap().join("task-mutation-home");
+    configure_analysis_task(fixture.project.path());
+
+    untrusted_dual_command(&fixture, &home)
+        .args(["--trust-project", "up"])
+        .assert()
+        .success();
+
+    untrusted_dual_command(&fixture, &home)
+        .env("DUAL_ENGINE_MUTATE_TASK", "1")
+        .args(["run", "analysis"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "Project files changed while code was executing",
+        ));
 }
 
 #[cfg(unix)]
@@ -939,6 +993,17 @@ fn write_test_lock(project: &std::path::Path, environment: &str) {
     .unwrap();
 }
 
+fn configure_analysis_task(project: &std::path::Path) {
+    let config_path = project.join("dual.toml");
+    fs::write(
+        &config_path,
+        fs::read_to_string(&config_path)
+            .unwrap()
+            .replace("[tasks]\n", "[tasks]\nanalysis = \"python script.py\"\n"),
+    )
+    .unwrap();
+}
+
 fn write_ready_environment(project: &std::path::Path) {
     let config = dual::config::Config::load(project).unwrap();
     let manifest = dual::backend::generate_manifest(&config).unwrap();
@@ -994,6 +1059,9 @@ if [ "$command_name" = "install" ]; then
   exit 0
 fi
 if [ "$command_name" = "run" ]; then
+  if [ "${DUAL_ENGINE_MUTATE_TASK:-0}" = "1" ]; then
+    printf '%s\n' '# changed by task' >> dual.toml
+  fi
   if printf '%s\n' "$*" | grep -q -- 'lockfile_create'; then
     mkdir -p .dual/workspace
     printf '{"lockfile_version":"1.0.0","packages":[]}\n' > .dual/workspace/pak.lock
