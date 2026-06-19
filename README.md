@@ -17,7 +17,7 @@ one command-line interface, and one reproducible environment.
 
 ```console
 dual init
-dual add r tidyverse lme4 emmeans
+dual add r dplyr ggplot2 tidyr
 dual add py pandas scikit-learn
 dual up
 dual run analysis
@@ -27,7 +27,7 @@ Add task commands to `dual.toml` before running them:
 
 ```toml
 [project]
-name = "beef-analysis"
+name = "cli-tools"
 
 [r]
 version = "4.5"
@@ -59,7 +59,7 @@ Users edit `dual.toml`, commit `dual.lock`, and run `dual` commands. Internal
 environment state is stored under `.dual/` and should not be edited directly.
 
 Python packages are resolved from PyPI. R and Python runtimes are resolved from
-conda-forge. Plain R package names such as `tidyverse` are also resolved from
+conda-forge. Plain R package names such as `dplyr` are also resolved from
 conda-forge using the predictable `r-<lowercase-name>` convention.
 
 R packages can explicitly use CRAN, Bioconductor, or GitHub when a conda-forge
