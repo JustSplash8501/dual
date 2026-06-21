@@ -832,39 +832,8 @@ impl Backend for EnvironmentBackend {
 
         #[cfg(not(windows))]
         {
-            self.unix_shell(config)
+            unix_shell(self, config)
         }
-    }
-
-    #[cfg(not(windows))]
-    fn unix_shell(&self, config: &Config) -> Result<()> {
-        let manifest = self.manifest_arg();
-        let owned_args = [
-            "shell".to_owned(),
-            "--manifest-path".to_owned(),
-            manifest,
-            "--locked".to_owned(),
-            "--change-ps1".to_owned(),
-            "true".to_owned(),
-        ];
-        let args = owned_args.iter().map(String::as_str).collect::<Vec<_>>();
-        if self.verbose {
-            eprintln!("{}", verbose_status("Opening project shell"));
-        }
-        let mut command = self.configured_command(&args)?;
-        self.prepare_shell_prompt(&config.project.name, &mut command)?;
-        let status = command
-            .stdin(Stdio::inherit())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .status()
-            .map_err(|error| DualError::BackendStart(error.to_string()))?;
-        if !status.success() {
-            self.finish_lock()?;
-            return Err(DualError::BackendFailed(status.to_string()).into());
-        }
-        self.finish_lock()?;
-        Ok(())
     }
 
     fn clean(&self) -> Result<Vec<PathBuf>> {
@@ -950,6 +919,37 @@ impl Backend for EnvironmentBackend {
             bridge,
         })
     }
+}
+
+#[cfg(not(windows))]
+fn unix_shell(backend: &EnvironmentBackend, config: &Config) -> Result<()> {
+    let manifest = backend.manifest_arg();
+    let owned_args = [
+        "shell".to_owned(),
+        "--manifest-path".to_owned(),
+        manifest,
+        "--locked".to_owned(),
+        "--change-ps1".to_owned(),
+        "true".to_owned(),
+    ];
+    let args = owned_args.iter().map(String::as_str).collect::<Vec<_>>();
+    if backend.verbose {
+        eprintln!("{}", verbose_status("Opening project shell"));
+    }
+    let mut command = backend.configured_command(&args)?;
+    backend.prepare_shell_prompt(&config.project.name, &mut command)?;
+    let status = command
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .map_err(|error| DualError::BackendStart(error.to_string()))?;
+    if !status.success() {
+        backend.finish_lock()?;
+        return Err(DualError::BackendFailed(status.to_string()).into());
+    }
+    backend.finish_lock()?;
+    Ok(())
 }
 
 #[cfg(windows)]
