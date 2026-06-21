@@ -81,6 +81,7 @@ fn run() -> Result<()> {
 }
 
 fn remove(root: &std::path::Path, language: Language, packages: &[String]) -> Result<()> {
+    security::reject_symlink_if_present(&Config::path(root), "dual.toml")?;
     let preserve_trust = security::project_is_trusted(root)?;
     let section = match language {
         Language::R => "r",
@@ -141,6 +142,7 @@ fn init(root: &std::path::Path, force: bool, name: Option<&str>) -> Result<()> {
 }
 
 fn add(root: &std::path::Path, language: Language, packages: &[String]) -> Result<()> {
+    security::reject_symlink_if_present(&Config::path(root), "dual.toml")?;
     let preserve_trust = security::project_is_trusted(root)?;
     let path = Config::path(root);
     let section = match language {
