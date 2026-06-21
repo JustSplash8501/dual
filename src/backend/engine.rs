@@ -1093,7 +1093,7 @@ struct ShellHook {
 }
 
 pub fn generate_manifest(config: &Config, root: &Path) -> Result<String> {
-    let project_root = root.to_string_lossy().into_owned();
+    let project_root = manifest_project_root(root);
     let mut dependencies = BTreeMap::new();
     dependencies.insert("r-base".to_owned(), version_constraint(&config.r.version));
     dependencies.insert(
@@ -1206,6 +1206,19 @@ pub fn generate_manifest(config: &Config, root: &Path) -> Result<String> {
         "{MANAGED_HEADER}{}",
         toml::to_string_pretty(&manifest)?
     ))
+}
+
+#[cfg(windows)]
+fn manifest_project_root(root: &Path) -> String {
+    root.to_string_lossy().into_owned()
+}
+
+#[cfg(not(windows))]
+fn manifest_project_root(root: &Path) -> String {
+    root.canonicalize()
+        .unwrap_or_else(|_| root.to_owned())
+        .to_string_lossy()
+        .into_owned()
 }
 
 fn r_startup_profile() -> String {
