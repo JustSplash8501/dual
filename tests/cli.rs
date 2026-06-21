@@ -367,6 +367,31 @@ fn execution_requires_trust_and_config_changes_invalidate_it() {
 
 #[cfg(unix)]
 #[test]
+fn add_preserves_existing_trust_for_the_suggested_plain_up() {
+    let fixture = backend_fixture();
+    let home = fixture.engine.parent().unwrap().join("add-trust-home");
+
+    untrusted_dual_command(&fixture, &home)
+        .args(["--trust-project", "up"])
+        .assert()
+        .success();
+
+    untrusted_dual_command(&fixture, &home)
+        .args(["add", "py", "certifi"])
+        .assert()
+        .success();
+
+    untrusted_dual_command(&fixture, &home)
+        .env("DUAL_ENGINE_FAIL_LOCKED", "1")
+        .arg("up")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("dual up --refresh"))
+        .stderr(predicate::str::contains("project is not trusted").not());
+}
+
+#[cfg(unix)]
+#[test]
 fn script_changes_invalidate_project_trust() {
     let fixture = backend_fixture();
     let home = fixture.engine.parent().unwrap().join("script-trust-home");
@@ -965,6 +990,7 @@ fn lock_migrate_rewrites_legacy_field() {
     assert!(!lock.contains("\"pixi\""));
 }
 
+#[cfg(unix)]
 fn sha256(contents: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     format!("{:x}", Sha256::digest(contents))
@@ -993,6 +1019,7 @@ fn write_test_lock(project: &std::path::Path, environment: &str) {
     .unwrap();
 }
 
+#[cfg(unix)]
 fn configure_analysis_task(project: &std::path::Path) {
     let config_path = project.join("dual.toml");
     fs::write(
@@ -1004,9 +1031,10 @@ fn configure_analysis_task(project: &std::path::Path) {
     .unwrap();
 }
 
+#[cfg(unix)]
 fn write_ready_environment(project: &std::path::Path) {
     let config = dual::config::Config::load(project).unwrap();
-    let manifest = dual::backend::generate_manifest(&config).unwrap();
+    let manifest = dual::backend::generate_manifest(&config, project).unwrap();
     fs::create_dir_all(project.join(".dual/workspace")).unwrap();
     fs::write(project.join(".dual/workspace/pyproject.toml"), manifest).unwrap();
     fs::write(project.join(".dual/ready"), "ready").unwrap();

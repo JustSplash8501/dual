@@ -46,6 +46,7 @@ Desktop.ini
 /.coverage/
 /coverage/
 /dual-e2e-local/
+/dual-e2e-windows-local/
 .coverage
 .coverage.*
 htmlcov/

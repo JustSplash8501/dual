@@ -81,11 +81,15 @@ fn run() -> Result<()> {
 }
 
 fn remove(root: &std::path::Path, language: Language, packages: &[String]) -> Result<()> {
+    let preserve_trust = security::project_is_trusted(root)?;
     let section = match language {
         Language::R => "r",
         Language::Py => "python",
     };
     let removed = Config::remove_packages(&Config::path(root), section, packages)?;
+    if preserve_trust {
+        security::refresh_project_trust(root)?;
+    }
     println!("Removed {removed} package(s) from dual.toml.");
     if root.join("dual.lock").is_file() {
         println!("Run `dual up --refresh` to update the shared environment lock.");
@@ -137,12 +141,16 @@ fn init(root: &std::path::Path, force: bool, name: Option<&str>) -> Result<()> {
 }
 
 fn add(root: &std::path::Path, language: Language, packages: &[String]) -> Result<()> {
+    let preserve_trust = security::project_is_trusted(root)?;
     let path = Config::path(root);
     let section = match language {
         Language::R => "r",
         Language::Py => "python",
     };
     Config::add_packages(&path, section, packages)?;
+    if preserve_trust {
+        security::refresh_project_trust(root)?;
+    }
 
     let label = match language {
         Language::R => "R",

@@ -131,7 +131,7 @@ impl EnvironmentBackend {
             let actual = sha256_file(path)?;
             if actual != expected {
                 anyhow::bail!(
-                    "dual's managed environment engine failed its integrity check. \
+                    "Dual environment support failed its integrity check. \
                      Run `dual engine update` to replace it."
                 );
             }
@@ -256,8 +256,11 @@ impl EnvironmentBackend {
         let home = security::default_dual_home();
         security::create_private_directory(&home, "dual data directory")?;
         let engine = home.join("engine");
-        security::create_private_directory(&engine, "environment engine directory")?;
-        security::create_private_directory(&engine.join("bin"), "environment engine bin directory")
+        security::create_private_directory(&engine, "Dual environment support directory")?;
+        security::create_private_directory(
+            &engine.join("bin"),
+            "Dual environment support bin directory",
+        )
     }
 
     fn prepare_state(&self) -> Result<()> {
@@ -285,6 +288,7 @@ impl EnvironmentBackend {
         Ok(())
     }
 
+    #[cfg(not(windows))]
     fn prepare_shell_prompt(&self, project_name: &str, command: &mut Command) -> Result<()> {
         let shell = env::var_os("SHELL")
             .and_then(|path| PathBuf::from(path).file_name().map(|name| name.to_owned()));
@@ -356,7 +360,7 @@ impl EnvironmentBackend {
     fn execute(&self, args: &[&str], friendly_action: &str) -> Result<()> {
         let mut command = self.internal_command(args)?;
         if self.verbose {
-            eprintln!("engine: {}", friendly_action.to_ascii_lowercase());
+            eprintln!("{}", verbose_status(friendly_action));
         }
         command.stdout(Stdio::null()).stderr(Stdio::null());
 
@@ -384,7 +388,7 @@ impl EnvironmentBackend {
 
     fn capture(&self, args: &[&str]) -> Result<ExitStatus> {
         if self.verbose {
-            eprintln!("engine: checking project environment");
+            eprintln!("{}", verbose_status("Checking project environment"));
         }
         let mut command = self.internal_command(args)?;
         command.stdout(Stdio::null()).stderr(Stdio::null());
@@ -606,7 +610,7 @@ impl Backend for EnvironmentBackend {
         if !home.exists() {
             return Ok(false);
         }
-        security::reject_symlink(&home, "environment engine directory")?;
+        security::reject_symlink(&home, "Dual environment support directory")?;
         fs::remove_dir_all(home)?;
         Ok(true)
     }
@@ -637,7 +641,7 @@ impl Backend for EnvironmentBackend {
         if !self.environment_exists() {
             anyhow::bail!("The project environment has not been created. Run `dual up` first.");
         }
-        let expected = generate_manifest(config)?;
+        let expected = generate_manifest(config, &self.root)?;
         let actual =
             security::read_text_file(&self.manifest_path(), MAX_LOCK_BYTES, "generated manifest")?;
         if actual != expected {
@@ -660,7 +664,7 @@ impl Backend for EnvironmentBackend {
         } else {
             None
         };
-        let generated = generate_manifest(config)?;
+        let generated = generate_manifest(config, &self.root)?;
         if self.manifest_path().exists() {
             let existing = security::read_text_file(
                 &self.manifest_path(),
@@ -714,7 +718,7 @@ impl Backend for EnvironmentBackend {
                     "The requested package set could not be resolved.".to_owned()
                 } else {
                     format!(
-                        "Some R package names used inferred conda-forge names: {}.",
+                        "Some R package names used inferred environment package names: {}.",
                         inferred.join(", ")
                     )
                 }
@@ -724,9 +728,9 @@ impl Backend for EnvironmentBackend {
                 let pixi = security::read_text_file(
                     &self.backend_lock_path(),
                     MAX_LOCK_BYTES,
-                    "environment engine lock",
+                    "environment resolution",
                 )
-                .context("the environment engine did not produce a lock resolution")?;
+                .context("Dual environment support did not produce a lock resolution")?;
                 let r = self.install_source_r_packages(config, existing_lock.as_ref(), refresh)?;
                 write_dual_lock(
                     &self.public_lock_path(),
@@ -819,6 +823,21 @@ impl Backend for EnvironmentBackend {
         self.verify_manifest(config)?;
         self.ensure_state_paths_safe()?;
         self.stage_lock()?;
+        #[cfg(windows)]
+        {
+            let result = windows_shell(self, config);
+            self.finish_lock()?;
+            result
+        }
+
+        #[cfg(not(windows))]
+        {
+            self.unix_shell(config)
+        }
+    }
+
+    #[cfg(not(windows))]
+    fn unix_shell(&self, config: &Config) -> Result<()> {
         let manifest = self.manifest_arg();
         let owned_args = [
             "shell".to_owned(),
@@ -830,7 +849,7 @@ impl Backend for EnvironmentBackend {
         ];
         let args = owned_args.iter().map(String::as_str).collect::<Vec<_>>();
         if self.verbose {
-            eprintln!("engine: opening project shell");
+            eprintln!("{}", verbose_status("Opening project shell"));
         }
         let mut command = self.configured_command(&args)?;
         self.prepare_shell_prompt(&config.project.name, &mut command)?;
@@ -933,6 +952,63 @@ impl Backend for EnvironmentBackend {
     }
 }
 
+#[cfg(windows)]
+fn windows_shell(backend: &EnvironmentBackend, config: &Config) -> Result<()> {
+    let manifest = backend.manifest_arg();
+    let output = backend
+        .internal_command(&[
+            "shell-hook",
+            "--manifest-path",
+            &manifest,
+            "--locked",
+            "--json",
+        ])?
+        .output()
+        .map_err(|error| DualError::BackendStart(error.to_string()))?;
+    if !output.status.success() {
+        return Err(DualError::BackendFailed(output.status.to_string()).into());
+    }
+    let hook: ShellHook = serde_json::from_slice(&output.stdout)
+        .context("Dual environment support returned invalid shell activation data")?;
+    let mut command = match windows_parent_shell() {
+        WindowsShell::Cmd => {
+            let mut command = Command::new(
+                env::var_os("ComSpec").unwrap_or_else(|| r"C:\Windows\System32\cmd.exe".into()),
+            );
+            command.args(["/D", "/K"]);
+            command.env("PROMPT", format!("({}) $P$G", config.project.name));
+            command
+        }
+        WindowsShell::PowerShell => {
+            let powershell = env::var_os("SystemRoot")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from(r"C:\Windows"))
+                .join(r"System32\WindowsPowerShell\v1.0\powershell.exe");
+            let mut command = Command::new(powershell);
+            command
+                .args(["-NoLogo", "-NoExit", "-Command"])
+                .arg(powershell_startup_script(&config.project.name));
+            command
+        }
+    };
+    command
+        .current_dir(&backend.root)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    for (name, value) in hook.environment_variables {
+        command.env(name, value);
+    }
+    let status = command
+        .status()
+        .map_err(|error| DualError::BackendStart(error.to_string()))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(DualError::BackendFailed(status.to_string()).into())
+    }
+}
+
 #[derive(Serialize)]
 struct PyProject {
     project: PyProjectMetadata,
@@ -1010,7 +1086,14 @@ struct RSourceLock {
     pak: serde_json::Value,
 }
 
-pub fn generate_manifest(config: &Config) -> Result<String> {
+#[cfg(windows)]
+#[derive(Deserialize)]
+struct ShellHook {
+    environment_variables: BTreeMap<String, String>,
+}
+
+pub fn generate_manifest(config: &Config, root: &Path) -> Result<String> {
+    let project_root = root.to_string_lossy().into_owned();
     let mut dependencies = BTreeMap::new();
     dependencies.insert("r-base".to_owned(), version_constraint(&config.r.version));
     dependencies.insert(
@@ -1080,10 +1163,7 @@ pub fn generate_manifest(config: &Config) -> Result<String> {
                         TargetConfig {
                             activation: Activation {
                                 env: BTreeMap::from([
-                                    (
-                                        "DUAL_PROJECT_ROOT".to_owned(),
-                                        "$PIXI_PROJECT_ROOT/../..".to_owned(),
-                                    ),
+                                    ("DUAL_PROJECT_ROOT".to_owned(), project_root.clone()),
                                     (
                                         "R_PROFILE_USER".to_owned(),
                                         "$PIXI_PROJECT_ROOT/../Rprofile".to_owned(),
@@ -1102,10 +1182,7 @@ pub fn generate_manifest(config: &Config) -> Result<String> {
                         TargetConfig {
                             activation: Activation {
                                 env: BTreeMap::from([
-                                    (
-                                        "DUAL_PROJECT_ROOT".to_owned(),
-                                        "%PIXI_PROJECT_ROOT%\\..\\..".to_owned(),
-                                    ),
+                                    ("DUAL_PROJECT_ROOT".to_owned(), project_root),
                                     (
                                         "R_PROFILE_USER".to_owned(),
                                         "%PIXI_PROJECT_ROOT%\\..\\Rprofile".to_owned(),
@@ -1169,6 +1246,7 @@ local({{
     )
 }
 
+#[cfg(any(not(windows), test))]
 fn zsh_startup_profile() -> &'static str {
     r#"# This file is generated by dual. Edit your normal .zshrc instead.
 _dual_wrapper_zdotdir=$ZDOTDIR
@@ -1455,7 +1533,7 @@ fn run_with_timeout(command: &mut Command, timeout: Duration) -> Result<ExitStat
             let _ = child.kill();
             let _ = child.wait();
             anyhow::bail!(
-                "environment engine timed out after {} seconds",
+                "Dual environment support timed out after {} seconds",
                 timeout.as_secs()
             )
         }
@@ -1467,6 +1545,70 @@ fn unique_suffix() -> u128 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
         .unwrap_or_default()
+}
+
+fn verbose_status(action: &str) -> String {
+    format!("dual: {}", action.to_ascii_lowercase())
+}
+
+#[cfg(windows)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WindowsShell {
+    PowerShell,
+    Cmd,
+}
+
+#[cfg(windows)]
+fn windows_parent_shell() -> WindowsShell {
+    if env::var("DUAL_SHELL").is_ok_and(|shell| shell.eq_ignore_ascii_case("cmd")) {
+        return WindowsShell::Cmd;
+    }
+    if env::var("DUAL_SHELL").is_ok_and(|shell| shell.eq_ignore_ascii_case("powershell")) {
+        return WindowsShell::PowerShell;
+    }
+
+    let pid = std::process::id().to_string();
+    let script = concat!(
+        "$process = Get-CimInstance Win32_Process -Filter ",
+        "\"ProcessId=$env:DUAL_PROCESS_ID\"; ",
+        "(Get-Process -Id $process.ParentProcessId).ProcessName"
+    );
+    let output = Command::new(
+        env::var_os("SystemRoot")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(r"C:\Windows"))
+            .join(r"System32\WindowsPowerShell\v1.0\powershell.exe"),
+    )
+    .args(["-NoProfile", "-NonInteractive", "-Command", script])
+    .env("DUAL_PROCESS_ID", pid)
+    .output();
+    if output.is_ok_and(|output| {
+        String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .eq_ignore_ascii_case("cmd")
+    }) {
+        WindowsShell::Cmd
+    } else {
+        WindowsShell::PowerShell
+    }
+}
+
+#[cfg(windows)]
+fn powershell_startup_script(project_name: &str) -> String {
+    format!(
+        concat!(
+            "Remove-Item Alias:R -Force -ErrorAction SilentlyContinue; ",
+            "$dualPromptPrefix = '({project_name}) '; ",
+            "$dualOriginalPrompt = $function:prompt; ",
+            "function global:prompt {{ ",
+            "$value = if ($dualOriginalPrompt) {{ & $dualOriginalPrompt }} ",
+            "else {{ 'PS ' + $executionContext.SessionState.Path.CurrentLocation + '> ' }}; ",
+            "while ($value.StartsWith($dualPromptPrefix)) {{ ",
+            "$value = $value.Substring($dualPromptPrefix.Length) }}; ",
+            "$dualPromptPrefix + $value }}"
+        ),
+        project_name = project_name
+    )
 }
 
 fn clear_engine_markers(root: &Path) -> Result<()> {
@@ -1528,7 +1670,7 @@ mod tests {
 
     #[test]
     fn generated_manifest_contains_expected_dependencies() {
-        let manifest = generate_manifest(&sample_config()).unwrap();
+        let manifest = generate_manifest(&sample_config(), Path::new("C:/projects/mixed")).unwrap();
         assert!(manifest.starts_with("# This file is generated by dual."));
         assert!(manifest.contains("r-tidyverse"));
         assert!(manifest.contains("r-emmeans"));
@@ -1544,7 +1686,9 @@ mod tests {
         assert!(manifest.contains("cmd = \"Rscript scripts/analysis.R\""));
         assert!(manifest.contains("cwd = \"../..\""));
         assert!(manifest.contains("[tool.pixi.target.unix.activation.env]"));
-        assert!(manifest.contains("DUAL_PROJECT_ROOT = \"$PIXI_PROJECT_ROOT/../..\""));
+        assert!(manifest.contains("DUAL_PROJECT_ROOT = \"C:/projects/mixed\""));
+        assert!(!manifest.contains("DUAL_PROJECT_ROOT = \"$PIXI_PROJECT_ROOT"));
+        assert!(!manifest.contains("DUAL_PROJECT_ROOT = \"%PIXI_PROJECT_ROOT%"));
         assert!(manifest.contains("R_PROFILE_USER = \"$PIXI_PROJECT_ROOT/../Rprofile\""));
         assert!(
             manifest.contains("RETICULATE_PYTHON = \"$PIXI_PROJECT_ROOT/../bridge/bin/python\"")
@@ -1577,10 +1721,28 @@ mod tests {
     }
 
     #[test]
+    fn verbose_status_uses_only_dual_terminology() {
+        let status = verbose_status("Checking project environment");
+        assert_eq!(status, "dual: checking project environment");
+        for forbidden in ["pixi", "conda", "engine"] {
+            assert!(!status.to_ascii_lowercase().contains(forbidden));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_powershell_startup_removes_the_r_alias_and_deduplicates_the_prompt() {
+        let script = powershell_startup_script("mixed");
+        assert!(script.contains("Remove-Item Alias:R"));
+        assert!(script.contains("$dualPromptPrefix = '(mixed) '"));
+        assert!(script.contains("while ($value.StartsWith($dualPromptPrefix))"));
+    }
+
+    #[test]
     fn generated_manifest_supports_python_versions_and_extras() {
         let mut config = sample_config();
         config.python.packages = vec!["pandas>=2,<3".into(), "requests[socks]==2.32.3".into()];
-        let manifest = generate_manifest(&config).unwrap();
+        let manifest = generate_manifest(&config, Path::new("C:/projects/mixed")).unwrap();
         assert!(manifest.contains("pandas = \">=2,<3\""));
         assert!(manifest.contains("[tool.pixi.pypi-dependencies.requests]"));
         assert!(manifest.contains("version = \"==2.32.3\""));

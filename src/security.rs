@@ -174,6 +174,13 @@ pub fn ensure_project_trusted(root: &Path, authorize: bool) -> Result<ProjectTru
     )
 }
 
+pub fn project_is_trusted(root: &Path) -> Result<bool> {
+    let fingerprint = project_fingerprint(root, true)?;
+    let trust_path = trust_path(root)?;
+    Ok(read_trust_record(&trust_path)
+        .is_ok_and(|record| constant_time_eq(record.trim().as_bytes(), fingerprint.as_bytes())))
+}
+
 pub fn refresh_project_trust(root: &Path) -> Result<()> {
     let fingerprint = project_fingerprint(root, true)?;
     write_trust_record(&trust_path(root)?, &fingerprint)
