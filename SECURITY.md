@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-Until dual reaches 1.0, security fixes are applied to the latest release only.
+Until `dual` reaches 1.0, security fixes are applied to the latest release only.
 
 ## Reporting a vulnerability
 
@@ -14,7 +14,7 @@ Use GitHub's private vulnerability reporting form:
 
 https://github.com/JustSplash8501/dual/security/advisories/new
 
-Include the affected dual version, operating system, reproduction steps, and
+Include the affected `dual` version, operating system, reproduction steps, and
 the potential impact. You should receive an acknowledgement within seven days.
-Please allow time for a fix and coordinated disclosure before publishing
+Please allow ample time for a fix and coordinated disclosure before publishing
 details.
