@@ -24,6 +24,10 @@ Set-Content dual.toml $config
 & $env:DUAL_BIN run pycheck
 if (-not (Test-Path dual.lock)) { throw "dual.lock was not created" }
 
+# Project-backed Quarto metadata must merge with dual.toml without replacing
+# the project's environment manifest or shared lockfile.
+$projectManifestHash = (Get-FileHash ".dual/workspace/pyproject.toml" -Algorithm SHA256).Hash
+$projectLockHash = (Get-FileHash "dual.lock" -Algorithm SHA256).Hash
 & $env:DUAL_BIN init --script report.qmd --python 3.12
 & $env:DUAL_BIN add --script report.qmd --python matplotlib
 & $env:DUAL_BIN --trust-project run report.qmd
@@ -32,6 +36,49 @@ $report = Get-Content report.html -Raw
 if (-not ($report -match "Hello from dual")) {
     throw "Quarto output did not contain the executed document content"
 }
+if ((Get-FileHash ".dual/workspace/pyproject.toml" -Algorithm SHA256).Hash -ne $projectManifestHash) {
+    throw "Script rendering replaced the project environment manifest"
+}
+if ((Get-FileHash "dual.lock" -Algorithm SHA256).Hash -ne $projectLockHash) {
+    throw "Script rendering replaced the project lockfile"
+}
+& $env:DUAL_BIN --trust-project doctor | Out-Null
+
+# A synchronized script must run without installing again.
+@'
+print("dual no-install ok")
+'@ | Set-Content executable.py
+& $env:DUAL_BIN init --script executable.py --python 3.12
+& $env:DUAL_BIN --trust-project sync --script executable.py
+$noInstall = & $env:DUAL_BIN run executable.py --no-install
+if (-not ($noInstall -match "dual no-install ok")) {
+    throw "Synchronized script did not run with --no-install"
+}
+
+# Standalone documents must work without an ancestor dual.toml.
+$projectRoot = $root
+$standaloneQuarto = Join-Path $env:RUNNER_TEMP "dual-standalone-quarto"
+Remove-Item -Recurse -Force $standaloneQuarto -ErrorAction SilentlyContinue
+New-Item -ItemType Directory -Path $standaloneQuarto | Out-Null
+Set-Location $standaloneQuarto
+& $env:DUAL_BIN init --script standalone.qmd --python 3.12
+& $env:DUAL_BIN --trust-project run standalone.qmd
+if (-not (Test-Path standalone.html)) { throw "Standalone Quarto did not render" }
+if (-not ((Get-Content standalone.html -Raw) -match "Hello from dual")) {
+    throw "Standalone Quarto output did not contain executed content"
+}
+
+$standaloneRMarkdown = Join-Path $env:RUNNER_TEMP "dual-standalone-rmarkdown"
+Remove-Item -Recurse -Force $standaloneRMarkdown -ErrorAction SilentlyContinue
+New-Item -ItemType Directory -Path $standaloneRMarkdown | Out-Null
+Set-Location $standaloneRMarkdown
+& $env:DUAL_BIN init --script standalone.Rmd --r 4.5
+& $env:DUAL_BIN --trust-project run standalone.Rmd
+if (-not (Test-Path standalone.html)) { throw "Standalone R Markdown did not render" }
+if (-not ((Get-Content standalone.html -Raw) -match "Hello from dual")) {
+    throw "Standalone R Markdown output did not contain executed content"
+}
+Set-Location $projectRoot
 
 New-Item -ItemType Directory -Path scripts/nested -Force | Out-Null
 Set-Location scripts/nested

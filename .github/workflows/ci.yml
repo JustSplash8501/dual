@@ -92,6 +92,26 @@ jobs:
 
       - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
 
+      - name: Validate Bash integration script
+        if: runner.os != 'Windows'
+        run: bash -n scripts/ci/real-integration.sh
+
+      - name: Validate PowerShell integration script
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path "scripts/ci/real-integration.ps1"),
+            [ref]$tokens,
+            [ref]$errors
+          ) | Out-Null
+          if ($errors.Count -gt 0) {
+            $errors | ForEach-Object { Write-Error $_.Message }
+            throw "PowerShell integration script contains syntax errors"
+          }
+
       - name: Build dual
         run: cargo build --locked --release
 
