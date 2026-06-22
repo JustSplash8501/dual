@@ -63,7 +63,7 @@ pub fn list_tasks(root: &Path) -> Result<()> {
 mod tests {
     use std::collections::BTreeMap;
 
-    use crate::config::{LanguageConfig, ProjectConfig};
+    use crate::config::{ProjectConfig, PythonConfig, QuartoConfig, RConfig};
 
     use super::*;
 
@@ -72,14 +72,18 @@ mod tests {
             project: ProjectConfig {
                 name: "test".into(),
             },
-            r: LanguageConfig {
+            r: RConfig {
+                enabled: true,
                 version: "4.5".into(),
                 packages: vec![],
             },
-            python: LanguageConfig {
+            python: PythonConfig {
+                enabled: true,
                 version: "3.12".into(),
                 packages: vec![],
+                index: vec![],
             },
+            quarto: QuartoConfig::default(),
             tasks: BTreeMap::from([("analysis".into(), "Rscript scripts/analysis.R".into())]),
         }
     }

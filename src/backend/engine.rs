@@ -26,6 +26,8 @@ const ENGINE_VERSION: &str = "0.70.2";
 #[derive(Clone, Debug)]
 pub struct EnvironmentBackend {
     root: PathBuf,
+    state_dir: PathBuf,
+    public_lock_path: PathBuf,
     verbose: bool,
 }
 
@@ -33,12 +35,33 @@ impl EnvironmentBackend {
     pub fn new(root: &Path, verbose: bool) -> Self {
         Self {
             root: root.to_owned(),
+            state_dir: root.join(".dual"),
+            public_lock_path: root.join("dual.lock"),
+            verbose,
+        }
+    }
+
+    pub fn for_script(root: &Path, script: &Path, verbose: bool) -> Self {
+        let relative = script.strip_prefix(root).unwrap_or(script);
+        let mut hasher = Sha256::new();
+        hasher.update(relative.to_string_lossy().as_bytes());
+        let identity = format!("{:x}", hasher.finalize());
+        let state_dir = root.join(".dual").join("scripts").join(&identity[..16]);
+        let public_lock_path = if Config::path(root).is_file() {
+            state_dir.join("dual.lock")
+        } else {
+            root.join("dual.lock")
+        };
+        Self {
+            root: root.to_owned(),
+            state_dir,
+            public_lock_path,
             verbose,
         }
     }
 
     fn state_dir(&self) -> PathBuf {
-        self.root.join(".dual")
+        self.state_dir.clone()
     }
 
     fn workspace_dir(&self) -> PathBuf {
@@ -58,7 +81,7 @@ impl EnvironmentBackend {
     }
 
     fn public_lock_path(&self) -> PathBuf {
-        self.root.join("dual.lock")
+        self.public_lock_path.clone()
     }
 
     fn staged_pak_lock_path(&self) -> PathBuf {
@@ -154,6 +177,7 @@ impl EnvironmentBackend {
             self.shell_state_dir(),
             self.zsh_state_dir(),
             self.zshrc_path(),
+            self.public_lock_path(),
         ] {
             security::ensure_managed_path(&self.root, &path)?;
         }
@@ -738,6 +762,7 @@ impl Backend for EnvironmentBackend {
                         version: 1,
                         environment: pixi,
                         r,
+                        metadata: Some(lock_metadata(config)),
                     },
                 )
             })();
@@ -767,19 +792,21 @@ impl Backend for EnvironmentBackend {
     }
 
     fn validate(&self, config: &Config) -> Result<()> {
-        if !self.run_check(&["Rscript", "--vanilla", "-e", "quit(status=0)"]) {
+        if config.r.enabled && !self.run_check(&["Rscript", "--vanilla", "-e", "quit(status=0)"]) {
             anyhow::bail!("R could not start inside the project environment.");
         }
-        if !self.run_check(&["python", "-I", "--version"]) {
+        if config.python.enabled && !self.run_check(&["python", "-I", "--version"]) {
             anyhow::bail!("Python could not start inside the project environment.");
         }
 
-        if config
-            .r
-            .packages
-            .iter()
-            .filter_map(|package| r_package_name(package))
-            .any(|package| package.eq_ignore_ascii_case("reticulate"))
+        if config.r.enabled
+            && config.python.enabled
+            && config
+                .r
+                .packages
+                .iter()
+                .filter_map(|package| r_package_name(package))
+                .any(|package| package.eq_ignore_ascii_case("reticulate"))
         {
             let check = concat!(
                 "library(reticulate); ",
@@ -866,20 +893,26 @@ impl Backend for EnvironmentBackend {
             });
         }
 
-        let r_available = self.run_check(&["Rscript", "--vanilla", "-e", "quit(status=0)"]);
-        let python_available = self.run_check(&["python", "-I", "--version"]);
-        let missing_r_packages = if r_available {
+        let r_available = config
+            .r
+            .enabled
+            .then(|| self.run_check(&["Rscript", "--vanilla", "-e", "quit(status=0)"]));
+        let python_available = config
+            .python
+            .enabled
+            .then(|| self.run_check(&["python", "-I", "--version"]));
+        let missing_r_packages = if r_available == Some(true) {
             self.missing_r_packages(&config.r.packages)
         } else {
             Vec::new()
         };
-        let missing_python_packages = if python_available {
+        let missing_python_packages = if python_available == Some(true) {
             self.missing_python_packages(&config.python.packages)
         } else {
             Vec::new()
         };
 
-        let bridge = if r_available && python_available {
+        let bridge = if r_available == Some(true) && python_available == Some(true) {
             let reticulate_installed = self.run_check(&[
                 "Rscript",
                 "--vanilla",
@@ -912,8 +945,8 @@ impl Backend for EnvironmentBackend {
             available,
             environment_present,
             lock_present,
-            r_available: Some(r_available),
-            python_available: Some(python_available),
+            r_available,
+            python_available,
             missing_r_packages,
             missing_python_packages,
             bridge,
@@ -1032,8 +1065,18 @@ struct PixiManifest {
     dependencies: BTreeMap<String, String>,
     #[serde(rename = "pypi-dependencies")]
     pypi_dependencies: BTreeMap<String, PypiDependency>,
+    #[serde(rename = "pypi-options", skip_serializing_if = "Option::is_none")]
+    pypi_options: Option<PypiOptions>,
     tasks: BTreeMap<String, TaskSpec>,
     target: BTreeMap<String, TargetConfig>,
+}
+
+#[derive(Serialize)]
+struct PypiOptions {
+    #[serde(rename = "index-url")]
+    index_url: String,
+    #[serde(rename = "extra-index-urls", skip_serializing_if = "Vec::is_empty")]
+    extra_index_urls: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -1077,6 +1120,8 @@ struct DualLock {
     environment: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     r: Option<RSourceLock>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    metadata: Option<LockMetadata>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1084,6 +1129,36 @@ struct DualLock {
 struct RSourceLock {
     sources: Vec<String>,
     pak: serde_json::Value,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct LockMetadata {
+    timestamp: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    python: Option<LockedLanguage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    r: Option<LockedR>,
+    #[serde(default)]
+    python_indexes: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct LockedLanguage {
+    requested: String,
+    resolved: String,
+    dependencies: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct LockedR {
+    requested: String,
+    resolved: String,
+    cran: Vec<String>,
+    bioc: Vec<String>,
+    github: Vec<String>,
 }
 
 #[cfg(windows)]
@@ -1095,35 +1170,49 @@ struct ShellHook {
 pub fn generate_manifest(config: &Config, root: &Path) -> Result<String> {
     let project_root = manifest_project_root(root);
     let mut dependencies = BTreeMap::new();
-    dependencies.insert("r-base".to_owned(), version_constraint(&config.r.version));
-    dependencies.insert(
-        "python".to_owned(),
-        version_constraint(&config.python.version),
-    );
-    for package in conda_r_packages(config) {
-        dependencies.insert(r_conda_name(package), "*".to_owned());
+    if config.r.enabled {
+        dependencies.insert("r-base".to_owned(), version_constraint(&config.r.version));
+        for package in conda_r_packages(config) {
+            dependencies.insert(r_conda_name(package), "*".to_owned());
+        }
+        if !source_r_packages(config).is_empty() {
+            dependencies.insert("r-pak".to_owned(), "*".to_owned());
+        }
     }
-    if !source_r_packages(config).is_empty() {
-        dependencies.insert("r-pak".to_owned(), "*".to_owned());
+    if config.python.enabled {
+        dependencies.insert(
+            "python".to_owned(),
+            version_constraint(&config.python.version),
+        );
+    }
+    if config.quarto.enabled {
+        dependencies.insert("quarto".to_owned(), "*".to_owned());
+        if config.python.enabled {
+            dependencies.insert("jupyter".to_owned(), "*".to_owned());
+        }
     }
 
-    let pypi_dependencies = config
-        .python
-        .packages
-        .iter()
-        .map(|package| {
-            let requirement = parse_python_requirement(package)?;
-            let dependency = if requirement.extras.is_empty() {
-                PypiDependency::Version(requirement.version)
-            } else {
-                PypiDependency::Detailed {
-                    version: requirement.version,
-                    extras: requirement.extras,
-                }
-            };
-            Ok((requirement.name, dependency))
-        })
-        .collect::<Result<BTreeMap<_, _>>>()?;
+    let pypi_dependencies = if config.python.enabled {
+        config
+            .python
+            .packages
+            .iter()
+            .map(|package| {
+                let requirement = parse_python_requirement(package)?;
+                let dependency = if requirement.extras.is_empty() {
+                    PypiDependency::Version(requirement.version)
+                } else {
+                    PypiDependency::Detailed {
+                        version: requirement.version,
+                        extras: requirement.extras,
+                    }
+                };
+                Ok((requirement.name, dependency))
+            })
+            .collect::<Result<BTreeMap<_, _>>>()?
+    } else {
+        BTreeMap::new()
+    };
 
     let manifest = PyProject {
         project: PyProjectMetadata {
@@ -1144,6 +1233,15 @@ pub fn generate_manifest(config: &Config, root: &Path) -> Result<String> {
                 },
                 dependencies,
                 pypi_dependencies,
+                pypi_options: config
+                    .python
+                    .enabled
+                    .then(|| config.python.index.split_first())
+                    .flatten()
+                    .map(|(first, rest)| PypiOptions {
+                        index_url: first.url.clone(),
+                        extra_index_urls: rest.iter().map(|index| index.url.clone()).collect(),
+                    }),
                 tasks: config
                     .tasks
                     .iter()
@@ -1152,7 +1250,7 @@ pub fn generate_manifest(config: &Config, root: &Path) -> Result<String> {
                             name.clone(),
                             TaskSpec {
                                 cmd: command.clone(),
-                                cwd: "../..".to_owned(),
+                                cwd: project_root.clone(),
                             },
                         )
                     })
@@ -1361,6 +1459,51 @@ fn r_package_name(package: &str) -> Option<String> {
             .filter(|name| !name.is_empty())
             .map(str::to_owned),
         _ => None,
+    }
+}
+
+fn lock_metadata(config: &Config) -> LockMetadata {
+    let mut cran = Vec::new();
+    let mut bioc = Vec::new();
+    let mut github = Vec::new();
+    for package in &config.r.packages {
+        if let Some(package) = package.strip_prefix("bioc::") {
+            bioc.push(package.to_owned());
+        } else if let Some(package) = package.strip_prefix("github::") {
+            github.push(package.to_owned());
+        } else if let Some(package) = package.strip_prefix("cran::") {
+            cran.push(package.to_owned());
+        } else {
+            cran.push(package.clone());
+        }
+    }
+    LockMetadata {
+        timestamp: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+        python: config.python.enabled.then(|| LockedLanguage {
+            requested: config.python.version.clone(),
+            resolved: config.python.version.clone(),
+            dependencies: config.python.packages.clone(),
+        }),
+        r: config.r.enabled.then(|| LockedR {
+            requested: config.r.version.clone(),
+            resolved: config.r.version.clone(),
+            cran,
+            bioc,
+            github,
+        }),
+        python_indexes: if config.python.enabled {
+            config
+                .python
+                .index
+                .iter()
+                .map(|index| index.url.clone())
+                .collect()
+        } else {
+            Vec::new()
+        },
     }
 }
 
@@ -1654,7 +1797,7 @@ fn clear_engine_markers(root: &Path) -> Result<()> {
 mod tests {
     use std::collections::BTreeMap;
 
-    use crate::config::{LanguageConfig, ProjectConfig};
+    use crate::config::{PackageIndex, ProjectConfig, PythonConfig, QuartoConfig, RConfig};
 
     use super::*;
 
@@ -1663,7 +1806,8 @@ mod tests {
             project: ProjectConfig {
                 name: "mixed".into(),
             },
-            r: LanguageConfig {
+            r: RConfig {
+                enabled: true,
                 version: "4.5".into(),
                 packages: vec![
                     "tidyverse".into(),
@@ -1673,10 +1817,13 @@ mod tests {
                     "custom=github::owner/repository@abc123".into(),
                 ],
             },
-            python: LanguageConfig {
+            python: PythonConfig {
+                enabled: true,
                 version: "3.12".into(),
                 packages: vec!["pandas".into(), "scikit-learn".into()],
+                index: vec![],
             },
+            quarto: QuartoConfig::default(),
             tasks: BTreeMap::from([("analysis".into(), "Rscript scripts/analysis.R".into())]),
         }
     }
@@ -1697,7 +1844,7 @@ mod tests {
         assert!(manifest.contains("osx-arm64"));
         assert!(manifest.contains("[tool.pixi.tasks.analysis]"));
         assert!(manifest.contains("cmd = \"Rscript scripts/analysis.R\""));
-        assert!(manifest.contains("cwd = \"../..\""));
+        assert!(manifest.contains("cwd = \"C:/projects/mixed\""));
         assert!(manifest.contains("[tool.pixi.target.unix.activation.env]"));
         assert!(manifest.contains("DUAL_PROJECT_ROOT = \"C:/projects/mixed\""));
         assert!(!manifest.contains("DUAL_PROJECT_ROOT = \"$PIXI_PROJECT_ROOT"));
@@ -1763,6 +1910,37 @@ mod tests {
     }
 
     #[test]
+    fn generated_manifest_supports_indexes_and_quarto() {
+        let mut config = sample_config();
+        config.python.index = vec![
+            PackageIndex {
+                url: "https://example.com/simple".into(),
+            },
+            PackageIndex {
+                url: "https://mirror.example.com/simple".into(),
+            },
+        ];
+        config.quarto.enabled = true;
+        let manifest = generate_manifest(&config, Path::new("/project")).unwrap();
+        assert!(manifest.contains("pypi-options"));
+        assert!(manifest.contains("index-url = \"https://example.com/simple\""));
+        assert!(manifest.contains("extra-index-urls"));
+        assert!(manifest.contains("quarto = \"*\""));
+        assert!(manifest.contains("jupyter = \"*\""));
+    }
+
+    #[test]
+    fn generated_manifest_only_installs_required_script_runtimes() {
+        let mut config = Config::empty("script");
+        config.python.enabled = true;
+        config.python.packages.push("rich".into());
+        let manifest = generate_manifest(&config, Path::new("/project")).unwrap();
+        assert!(manifest.contains("python ="));
+        assert!(manifest.contains("rich ="));
+        assert!(!manifest.contains("r-base"));
+    }
+
+    #[test]
     fn shared_lock_is_enforced_when_manifest_is_regenerated() {
         assert!(should_use_locked_install(true, false));
     }
@@ -1823,6 +2001,7 @@ mod tests {
                 ],
                 pak: serde_json::json!({"lockfile_version": "1.0.0"}),
             }),
+            metadata: None,
         };
 
         write_dual_lock(&path, &expected).unwrap();

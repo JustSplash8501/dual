@@ -82,6 +82,219 @@ fn init_does_not_overwrite_existing_config() {
 }
 
 #[test]
+fn init_script_creates_python_r_and_document_starters() {
+    let directory = tempdir().unwrap();
+    for (file, args, expected) in [
+        (
+            "analysis.py",
+            vec!["--python", "3.12"],
+            "requires-python = \"3.12\"",
+        ),
+        ("analysis.R", vec!["--r", "4.4"], "r = \"4.4\""),
+        (
+            "report.qmd",
+            vec!["--python", "3.12", "--r", "4.4"],
+            "<!-- /// script",
+        ),
+        (
+            "report.Rmd",
+            vec!["--python", "3.12", "--r", "4.4"],
+            "<!-- /// script",
+        ),
+    ] {
+        let mut command = Command::cargo_bin("dual").unwrap();
+        command
+            .current_dir(directory.path())
+            .args(["init", "--script", file])
+            .args(args)
+            .assert()
+            .success();
+        let contents = fs::read_to_string(directory.path().join(file)).unwrap();
+        assert!(contents.contains(expected));
+        assert!(contents.contains("Hello from dual"));
+    }
+}
+
+#[test]
+fn init_script_preserves_shebang_and_requires_force_for_existing_metadata() {
+    let directory = tempdir().unwrap();
+    let script = directory.path().join("analysis.py");
+    fs::write(&script, "#!/usr/bin/env -S dual run\nprint('existing')\n").unwrap();
+
+    Command::cargo_bin("dual")
+        .unwrap()
+        .current_dir(directory.path())
+        .args(["init", "--script", "analysis.py"])
+        .assert()
+        .success();
+    let contents = fs::read_to_string(&script).unwrap();
+    assert!(contents.starts_with("#!/usr/bin/env -S dual run\n# /// script"));
+    assert!(contents.contains("print('existing')"));
+
+    Command::cargo_bin("dual")
+        .unwrap()
+        .current_dir(directory.path())
+        .args(["init", "--script", "analysis.py"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("already contains inline metadata"));
+    Command::cargo_bin("dual")
+        .unwrap()
+        .current_dir(directory.path())
+        .args([
+            "init",
+            "--script",
+            "analysis.py",
+            "--python",
+            "3.13",
+            "--force",
+        ])
+        .assert()
+        .success();
+    assert!(fs::read_to_string(script)
+        .unwrap()
+        .contains("requires-python = \"3.13\""));
+}
+
+#[test]
+fn add_script_updates_dependencies_sources_and_avoids_duplicates() {
+    let directory = tempdir().unwrap();
+    Command::cargo_bin("dual")
+        .unwrap()
+        .current_dir(directory.path())
+        .args(["init", "--script", "analysis.py"])
+        .assert()
+        .success();
+    Command::cargo_bin("dual")
+        .unwrap()
+        .current_dir(directory.path())
+        .args([
+            "add",
+            "--script",
+            "analysis.py",
+            "--index",
+            "https://example.com/simple",
+            "rich",
+            "rich",
+        ])
+        .assert()
+        .success();
+    let contents = fs::read_to_string(directory.path().join("analysis.py")).unwrap();
+    assert_eq!(contents.matches("\"rich\"").count(), 1);
+    assert!(contents.contains("[[tool.dual.index]]"));
+    assert!(contents.contains("https://example.com/simple"));
+
+    Command::cargo_bin("dual")
+        .unwrap()
+        .current_dir(directory.path())
+        .args(["init", "--script", "report.qmd"])
+        .assert()
+        .success();
+    Command::cargo_bin("dual")
+        .unwrap()
+        .current_dir(directory.path())
+        .args(["add", "--script", "report.qmd", "knitr"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("use `--python` or `--r`"));
+    Command::cargo_bin("dual")
+        .unwrap()
+        .current_dir(directory.path())
+        .args(["add", "--script", "report.qmd", "--r", "--bioc", "DESeq2"])
+        .assert()
+        .success();
+    assert!(fs::read_to_string(directory.path().join("report.qmd"))
+        .unwrap()
+        .contains("bioc = [\n  \"DESeq2\","));
+}
+
+#[test]
+fn deps_and_dry_run_merge_project_and_inline_metadata() {
+    let directory = initialized_project();
+    Command::cargo_bin("dual")
+        .unwrap()
+        .current_dir(directory.path())
+        .args(["add", "py", "pandas"])
+        .assert()
+        .success();
+    fs::write(
+        directory.path().join("analysis.py"),
+        "# /// script\n# requires-python = \">=3.13\"\n# dependencies = [\"rich\"]\n# ///\nprint('ok')\n",
+    )
+    .unwrap();
+
+    Command::cargo_bin("dual")
+        .unwrap()
+        .current_dir(directory.path())
+        .args(["deps", "--script", "analysis.py"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("project dual.toml and inline script metadata")
+                .and(predicate::str::contains("Python version: >=3.13"))
+                .and(predicate::str::contains("pandas, rich")),
+        );
+    Command::cargo_bin("dual")
+        .unwrap()
+        .current_dir(directory.path())
+        .args(["run", "analysis.py", "--dry-run"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Would run: python \"analysis.py\"",
+        ));
+    Command::cargo_bin("dual")
+        .unwrap()
+        .current_dir(directory.path())
+        .args(["sync", "--script", "analysis.py", "--dry-run"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Would prepare dependencies"));
+}
+
+#[test]
+fn export_commands_write_conservative_files() {
+    let directory = initialized_project();
+    Command::cargo_bin("dual")
+        .unwrap()
+        .current_dir(directory.path())
+        .args(["add", "py", "pandas", "rich"])
+        .assert()
+        .success();
+    for (flag, file, expected) in [
+        ("--requirements", "requirements.txt", "pandas"),
+        ("--renv", "renv-dependencies.R", "renv::init"),
+        ("--dockerfile", "Dockerfile", "Generated by dual"),
+    ] {
+        Command::cargo_bin("dual")
+            .unwrap()
+            .current_dir(directory.path())
+            .args(["export", flag])
+            .assert()
+            .success();
+        assert!(fs::read_to_string(directory.path().join(file))
+            .unwrap()
+            .contains(expected));
+    }
+}
+
+#[test]
+fn doctor_reports_system_status_without_a_project() {
+    let directory = tempdir().unwrap();
+    Command::cargo_bin("dual")
+        .unwrap()
+        .current_dir(directory.path())
+        .arg("doctor")
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("System")
+                .and(predicate::str::contains("operating system"))
+                .and(predicate::str::contains("no dual.toml found")),
+        );
+}
+
+#[test]
 fn force_init_invalidates_stale_environment_and_lock() {
     let directory = initialized_project();
     fs::create_dir(directory.path().join(".dual")).unwrap();
@@ -153,9 +366,9 @@ fn add_r_accepts_cran_bioconductor_and_github_references() {
         .success();
 
     let config = fs::read_to_string(directory.path().join("dual.toml")).unwrap();
-    assert!(config.contains("cran::targets@1.11.4"));
-    assert!(config.contains("bioc::DESeq2"));
-    assert!(config.contains("github::r-lib/pak@v0.9.0"));
+    assert!(config.contains("cran = [\"targets@1.11.4\"]"));
+    assert!(config.contains("bioc = [\"DESeq2\"]"));
+    assert!(config.contains("github = [\"r-lib/pak@v0.9.0\"]"));
 }
 
 #[test]
@@ -169,7 +382,7 @@ fn add_py_updates_packages() {
         .success();
 
     let config = fs::read_to_string(directory.path().join("dual.toml")).unwrap();
-    assert!(config.contains("packages = [\"pandas>=2,<3\", \"requests[socks]==2.32.3\"]"));
+    assert!(config.contains("dependencies = [\"pandas>=2,<3\", \"requests[socks]==2.32.3\"]"));
 }
 
 #[test]
@@ -703,7 +916,8 @@ fn stale_embedded_r_source_resolution_explains_how_to_refresh() {
         &config_path,
         fs::read_to_string(&config_path)
             .unwrap()
-            .replace("cran::targets@1.11.4", "bioc::DESeq2"),
+            .replace("cran = [\"targets@1.11.4\"]", "cran = []")
+            .replacen("bioc = []", "bioc = [\"DESeq2\"]", 1),
     )
     .unwrap();
 
@@ -737,6 +951,42 @@ fn run_prints_task_output() {
             predicate::str::contains("analysis complete")
                 .and(predicate::str::contains("Pixi task").not()),
         );
+}
+
+#[cfg(unix)]
+#[test]
+fn run_script_prepares_environment_executes_and_records_lock_metadata() {
+    let fixture = backend_fixture();
+    fs::write(
+        fixture.project.path().join("analysis.py"),
+        "# /// script\n# requires-python = \">=3.12\"\n# dependencies = [\"rich\"]\n# ///\nprint('ok')\n",
+    )
+    .unwrap();
+
+    dual_command(&fixture)
+        .args(["run", "analysis.py", "--no-install"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("dual sync --script"));
+    dual_command(&fixture)
+        .args(["run", "analysis.py"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Running"));
+
+    let calls = fs::read_to_string(&fixture.log).unwrap();
+    assert!(calls.contains("__dual_script"));
+    let script_state = fs::read_dir(fixture.project.path().join(".dual/scripts"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let lock: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(script_state.join("dual.lock")).unwrap()).unwrap();
+    assert_eq!(lock["metadata"]["python"]["requested"], ">=3.12");
+    assert_eq!(lock["metadata"]["python"]["dependencies"][0], "rich");
+    assert!(lock["metadata"]["timestamp"].is_number());
 }
 
 #[cfg(unix)]

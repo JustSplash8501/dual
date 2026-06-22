@@ -3,7 +3,10 @@ use clap::Parser;
 use dual::backend::{Backend, EnvironmentBackend};
 use dual::cli::{Cli, Commands, EngineCommand, Language, LockCommand, TaskCommand};
 use dual::config::{validate_project_name, Config, DEFAULT_CONFIG};
+use dual::metadata::{self, AddOptions, ScriptLanguage};
+use dual::workflows::{self, ExportFormat};
 use dual::{doctor, security, tasks};
+use std::path::Path;
 
 fn main() {
     if let Err(error) = run() {
@@ -15,40 +18,149 @@ fn main() {
 fn run() -> Result<()> {
     let cli = Cli::parse();
     let current = std::env::current_dir()?;
-    let root = if matches!(
-        &cli.command,
-        Commands::Init { .. } | Commands::Engine { .. }
-    ) {
-        current
-    } else {
-        Config::find_root(&current)?
-    };
-    let backend = EnvironmentBackend::new(&root, cli.verbose);
+    let verbose = cli.verbose;
+    let trust_project = cli.trust_project;
 
     match cli.command {
         Commands::Init {
             force,
             name,
             legacy_name,
+            script,
+            python,
+            r,
         } => {
+            if let Some(script) = script {
+                if name.is_some() || legacy_name.is_some() {
+                    anyhow::bail!("a project name cannot be used with `dual init --script`");
+                }
+                let script = metadata::absolute_path(&script)?;
+                metadata::initialize(&script, python.as_deref(), r.as_deref(), force)?;
+                println!("Initialized inline metadata in {}.", script.display());
+                return Ok(());
+            }
+            if python.is_some() || r.is_some() {
+                anyhow::bail!("`--python` and `--r` require `dual init --script FILE`");
+            }
             if name.is_some() && legacy_name.is_some() {
                 anyhow::bail!("provide the project name once: `dual init PROJECT_NAME`");
             }
-            init(&root, force, name.as_deref().or(legacy_name.as_deref()))
+            init(&current, force, name.as_deref().or(legacy_name.as_deref()))
         }
-        Commands::Add { language, packages } => add(&root, language, &packages),
-        Commands::Remove { language, packages } => remove(&root, language, &packages),
-        Commands::Up { refresh } => up(&root, &backend, refresh, cli.trust_project),
-        Commands::Run { task } => tasks::run_task(&root, &backend, &task, cli.trust_project),
+        Commands::Add {
+            script,
+            python,
+            r,
+            index,
+            github,
+            bioc,
+            items,
+        } => {
+            if let Some(script) = script {
+                let language = match (python, r) {
+                    (true, false) => Some(ScriptLanguage::Python),
+                    (false, true) => Some(ScriptLanguage::R),
+                    (false, false) => None,
+                    (true, true) => unreachable!("clap rejects conflicting flags"),
+                };
+                let script = metadata::absolute_path(&script)?;
+                metadata::add(
+                    &script,
+                    AddOptions {
+                        language,
+                        packages: &items,
+                        index: index.as_deref(),
+                        github: github.as_deref(),
+                        bioc,
+                    },
+                )?;
+                println!("Updated inline metadata in {}.", script.display());
+                return Ok(());
+            }
+            if python || r || index.is_some() || github.is_some() || bioc {
+                anyhow::bail!("script package-source flags require `dual add --script FILE`");
+            }
+            let (language, packages) = parse_project_add_items(&items)?;
+            let root = Config::find_root(&current)?;
+            add(&root, language, packages)
+        }
+        Commands::Remove { language, packages } => {
+            let root = Config::find_root(&current)?;
+            remove(&root, language, &packages)
+        }
+        Commands::Up { refresh } => {
+            let root = Config::find_root(&current)?;
+            let backend = EnvironmentBackend::new(&root, verbose);
+            up(&root, &backend, refresh, trust_project)
+        }
+        Commands::Run {
+            target,
+            no_install,
+            dry_run,
+        } => {
+            if workflows::looks_like_script(&target) {
+                workflows::run_script(
+                    Path::new(&target),
+                    verbose,
+                    trust_project,
+                    no_install,
+                    dry_run,
+                )
+            } else {
+                if no_install || dry_run {
+                    anyhow::bail!("`--no-install` and `--dry-run` are supported for script runs");
+                }
+                let root = Config::find_root(&current)?;
+                let backend = EnvironmentBackend::new(&root, verbose);
+                tasks::run_task(&root, &backend, &target, trust_project)
+            }
+        }
+        Commands::Sync { script, dry_run } => {
+            if let Some(script) = script {
+                workflows::sync_script(&script, verbose, trust_project, dry_run)
+            } else {
+                let root = Config::find_root(&current)?;
+                workflows::sync_project(&root, verbose, trust_project, dry_run)
+            }
+        }
+        Commands::Deps { script } => {
+            if let Some(script) = script {
+                workflows::show_script_dependencies(&script)
+            } else {
+                let root = Config::find_root(&current)?;
+                workflows::show_project_dependencies(&root)
+            }
+        }
+        Commands::Export {
+            requirements,
+            renv,
+            dockerfile: _,
+        } => {
+            let root = Config::find_root(&current)?;
+            let format = if requirements {
+                ExportFormat::Requirements
+            } else if renv {
+                ExportFormat::Renv
+            } else {
+                ExportFormat::Dockerfile
+            };
+            let path = workflows::export(&root, format)?;
+            println!("Wrote {}.", path.display());
+            Ok(())
+        }
         Commands::Task {
             command: TaskCommand::List,
-        } => tasks::list_tasks(&root),
+        } => {
+            let root = Config::find_root(&current)?;
+            tasks::list_tasks(&root)
+        }
         Commands::Engine {
             command: EngineCommand::Update,
-        } => backend.update_engine(),
+        } => EnvironmentBackend::new(&current, verbose).update_engine(),
         Commands::Engine {
             command: EngineCommand::Uninstall,
         } => {
+            let backend = EnvironmentBackend::new(&current, verbose);
             if backend.uninstall_engine()? {
                 println!("Removed dual's private environment support.");
             } else {
@@ -59,6 +171,8 @@ fn run() -> Result<()> {
         Commands::Lock {
             command: LockCommand::Migrate,
         } => {
+            let root = Config::find_root(&current)?;
+            let backend = EnvironmentBackend::new(&root, verbose);
             if backend.migrate_lock()? {
                 println!("Migrated dual.lock to the current format.");
             } else {
@@ -66,18 +180,47 @@ fn run() -> Result<()> {
             }
             Ok(())
         }
-        Commands::Shell => shell(&root, &backend, cli.trust_project),
-        Commands::Doctor => {
-            if backend.environment_exists() {
-                let trust = security::ensure_project_trusted(&root, cli.trust_project)?;
-                let config = Config::load(&root)?;
-                backend.verify_manifest(&config)?;
-                security::verify_project_unchanged(&root, &trust)?;
-            }
-            doctor::run(&root, &backend)
+        Commands::Shell => {
+            let root = Config::find_root(&current)?;
+            let backend = EnvironmentBackend::new(&root, verbose);
+            shell(&root, &backend, trust_project)
         }
-        Commands::Clean { yes } => clean(&root, &backend, yes),
+        Commands::Doctor => {
+            let root = Config::find_root_optional(&current);
+            if let Some(root) = root {
+                let backend = EnvironmentBackend::new(&root, verbose);
+                if backend.environment_exists() {
+                    let trust = security::ensure_project_trusted(&root, trust_project)?;
+                    let config = Config::load(&root)?;
+                    backend.verify_manifest(&config)?;
+                    security::verify_project_unchanged(&root, &trust)?;
+                }
+                doctor::run(&root, &backend)
+            } else {
+                doctor::run_system()
+            }
+        }
+        Commands::Clean { yes } => {
+            let root = Config::find_root(&current)?;
+            let backend = EnvironmentBackend::new(&root, verbose);
+            clean(&root, &backend, yes)
+        }
     }
+}
+
+fn parse_project_add_items(items: &[String]) -> Result<(Language, &[String])> {
+    let Some((language, packages)) = items.split_first() else {
+        anyhow::bail!("usage: dual add <r|py> PACKAGE...");
+    };
+    if packages.is_empty() {
+        anyhow::bail!("provide at least one package name");
+    }
+    let language = match language.to_ascii_lowercase().as_str() {
+        "r" => Language::R,
+        "py" | "python" => Language::Py,
+        _ => anyhow::bail!("package ecosystem must be `r` or `py`"),
+    };
+    Ok((language, packages))
 }
 
 fn remove(root: &std::path::Path, language: Language, packages: &[String]) -> Result<()> {

@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::process::{Command, Stdio};
 
 use anyhow::Result;
 
@@ -7,6 +8,8 @@ use crate::config::Config;
 use crate::platform;
 
 pub fn run(root: &Path, backend: &impl Backend) -> Result<()> {
+    print_system_checks();
+    println!();
     println!("Project");
     let config_path = Config::path(root);
     if !config_path.exists() {
@@ -52,42 +55,54 @@ pub fn run(root: &Path, backend: &impl Backend) -> Result<()> {
     }
 
     println!("\nR");
-    print_runtime("R", report.r_available);
-    println!("✓ {} R packages configured", config.r.packages.len());
-    for package in &report.missing_r_packages {
-        println!("⚠ Package not installed: {package}");
-        fixes.push("dual up");
+    if config.r.enabled {
+        print_runtime("R", report.r_available);
+        println!("✓ {} R packages configured", config.r.packages.len());
+        for package in &report.missing_r_packages {
+            println!("⚠ Package not installed: {package}");
+            fixes.push("dual up");
+        }
+    } else {
+        println!("○ R is not required by this environment");
     }
 
     println!("\nPython");
-    print_runtime("Python", report.python_available);
-    println!(
-        "✓ {} Python packages configured",
-        config.python.packages.len()
-    );
-    for package in &report.missing_python_packages {
-        println!("⚠ Package not installed: {package}");
-        fixes.push("dual up");
+    if config.python.enabled {
+        print_runtime("Python", report.python_available);
+        println!(
+            "✓ {} Python packages configured",
+            config.python.packages.len()
+        );
+        for package in &report.missing_python_packages {
+            println!("⚠ Package not installed: {package}");
+            fixes.push("dual up");
+        }
+    } else {
+        println!("○ Python is not required by this environment");
     }
 
     println!("\nBridge");
-    match report.bridge {
-        Some(bridge) => {
-            println!("✓ R and Python are both enabled");
-            if !bridge.reticulate_installed {
-                println!("⚠ reticulate is not installed");
-                fixes.push("dual add r reticulate");
-            } else if bridge.uses_project_python {
-                println!("✓ reticulate uses the project Python");
-            } else {
-                println!("⚠ reticulate is not using the project Python");
-                fixes.push("dual up");
+    if !config.r.enabled || !config.python.enabled {
+        println!("○ R/Python bridge is not required");
+    } else {
+        match report.bridge {
+            Some(bridge) => {
+                println!("✓ R and Python are both enabled");
+                if !bridge.reticulate_installed {
+                    println!("⚠ reticulate is not installed");
+                    fixes.push("dual add r reticulate");
+                } else if bridge.uses_project_python {
+                    println!("✓ reticulate uses the project Python");
+                } else {
+                    println!("⚠ reticulate is not using the project Python");
+                    fixes.push("dual up");
+                }
             }
+            None if report.environment_present => {
+                println!("⚠ R/Python bridge could not be checked");
+            }
+            None => println!("⚠ Create the environment to check R/Python interoperability"),
         }
-        None if report.environment_present => {
-            println!("⚠ R/Python bridge could not be checked");
-        }
-        None => println!("⚠ Create the environment to check R/Python interoperability"),
     }
 
     println!("\nTasks");
@@ -113,6 +128,57 @@ pub fn run(root: &Path, backend: &impl Backend) -> Result<()> {
         }
     }
     Ok(())
+}
+
+pub fn run_system() -> Result<()> {
+    print_system_checks();
+    println!("\nProject");
+    println!("⚠ no dual.toml found from the current directory");
+    println!("\nSuggested fixes:\n  dual init");
+    Ok(())
+}
+
+fn print_system_checks() {
+    println!("System");
+    println!(
+        "✓ operating system: {} ({})",
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    );
+    print_tool("Python", &["python", "python3"]);
+    print_tool("uv", &["uv"]);
+    print_tool("R", &["R"]);
+    print_tool("Rscript", &["Rscript"]);
+    print_tool("Quarto", &["quarto"]);
+    print_tool("Git", &["git"]);
+    let build_tools = if cfg!(windows) {
+        &["cl", "gcc", "clang"][..]
+    } else {
+        &["cc", "gcc", "clang", "make"][..]
+    };
+    if build_tools.iter().any(|tool| tool_available(tool)) {
+        println!("✓ compiler or build tool available");
+    } else {
+        println!("⚠ no common compiler or build tool found on PATH");
+    }
+}
+
+fn print_tool(label: &str, candidates: &[&str]) {
+    if let Some(tool) = candidates.iter().find(|tool| tool_available(tool)) {
+        println!("✓ {label} available ({tool})");
+    } else {
+        println!("⚠ {label} not found on PATH");
+    }
+}
+
+fn tool_available(tool: &str) -> bool {
+    Command::new(tool)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok()
 }
 
 fn print_runtime(name: &str, status: Option<bool>) {

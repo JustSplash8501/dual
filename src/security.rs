@@ -17,6 +17,12 @@ pub struct ProjectTrust {
     execution_fingerprint: String,
 }
 
+#[derive(Clone, Debug)]
+pub struct ProjectSnapshot {
+    execution_fingerprint: String,
+    excluded: Vec<PathBuf>,
+}
+
 pub fn default_dual_home() -> PathBuf {
     if let Some(path) = env::var_os("DUAL_HOME") {
         return PathBuf::from(path);
@@ -197,7 +203,52 @@ pub fn verify_project_unchanged(root: &Path, trust: &ProjectTrust) -> Result<()>
     Ok(())
 }
 
+pub fn snapshot_project_excluding(root: &Path, excluded: &[PathBuf]) -> Result<ProjectSnapshot> {
+    let excluded = excluded
+        .iter()
+        .map(|path| path.strip_prefix(root).unwrap_or(path).to_path_buf())
+        .collect::<Vec<_>>();
+    for path in &excluded {
+        if path.is_absolute()
+            || path
+                .components()
+                .any(|component| !matches!(component, Component::Normal(_)))
+        {
+            anyhow::bail!(
+                "excluded project output path is invalid: {}",
+                path.display()
+            );
+        }
+    }
+    Ok(ProjectSnapshot {
+        execution_fingerprint: project_fingerprint_excluding(root, false, &excluded)?,
+        excluded,
+    })
+}
+
+pub fn verify_project_snapshot(root: &Path, snapshot: &ProjectSnapshot) -> Result<()> {
+    let current = project_fingerprint_excluding(root, false, &snapshot.excluded)?;
+    if !constant_time_eq(
+        current.as_bytes(),
+        snapshot.execution_fingerprint.as_bytes(),
+    ) {
+        anyhow::bail!(
+            "Project source files changed while code was executing. The changes were not \
+             trusted; review them and rerun with `--trust-project`."
+        );
+    }
+    Ok(())
+}
+
 fn project_fingerprint(root: &Path, include_lock: bool) -> Result<String> {
+    project_fingerprint_excluding(root, include_lock, &[])
+}
+
+fn project_fingerprint_excluding(
+    root: &Path,
+    include_lock: bool,
+    excluded: &[PathBuf],
+) -> Result<String> {
     let canonical = fs::canonicalize(root)
         .with_context(|| format!("could not canonicalize project root {}", root.display()))?;
     let mut hasher = Sha256::new();
@@ -210,6 +261,7 @@ fn project_fingerprint(root: &Path, include_lock: bool) -> Result<String> {
         root,
         root,
         include_lock,
+        excluded,
         &mut hasher,
         &mut files,
         &mut bytes,
@@ -221,6 +273,7 @@ fn hash_project_directory(
     root: &Path,
     directory: &Path,
     include_lock: bool,
+    excluded: &[PathBuf],
     hasher: &mut Sha256,
     files: &mut usize,
     bytes: &mut u64,
@@ -241,6 +294,12 @@ fn hash_project_directory(
             .strip_prefix(root)
             .with_context(|| format!("project path escaped its root: {}", path.display()))?;
         let first = relative.components().next();
+        if excluded
+            .iter()
+            .any(|excluded| relative == excluded || relative.starts_with(excluded))
+        {
+            continue;
+        }
         if matches!(
             first,
             Some(Component::Normal(name)) if name == ".git" || name == ".dual" || name == "results"
@@ -259,7 +318,7 @@ fn hash_project_directory(
             );
         }
         if metadata.is_dir() {
-            hash_project_directory(root, &path, include_lock, hasher, files, bytes)?;
+            hash_project_directory(root, &path, include_lock, excluded, hasher, files, bytes)?;
             continue;
         }
         if !metadata.is_file() {
@@ -305,10 +364,32 @@ fn hash_project_directory(
 }
 
 fn excluded_dual_home(root: &Path, path: &Path) -> bool {
-    let home = normalize_lexical_path(&default_dual_home());
-    let root = normalize_lexical_path(root);
-    let path = normalize_lexical_path(path);
+    let home = normalize_identity_path(&default_dual_home());
+    let root = normalize_identity_path(root);
+    let path = normalize_identity_path(path);
     home.is_absolute() && home.starts_with(root) && path.starts_with(home)
+}
+
+fn normalize_identity_path(path: &Path) -> PathBuf {
+    if let Ok(canonical) = fs::canonicalize(path) {
+        return canonical;
+    }
+    let mut current = path;
+    let mut missing = Vec::new();
+    while let Some(name) = current.file_name() {
+        missing.push(name.to_owned());
+        let Some(parent) = current.parent() else {
+            break;
+        };
+        current = parent;
+        if let Ok(mut canonical) = fs::canonicalize(current) {
+            for component in missing.iter().rev() {
+                canonical.push(component);
+            }
+            return normalize_lexical_path(&canonical);
+        }
+    }
+    normalize_lexical_path(path)
 }
 
 fn normalize_lexical_path(path: &Path) -> PathBuf {
@@ -446,5 +527,19 @@ mod tests {
         hash_path(&mut second, Path::new(OsStr::from_bytes(b"script-\x81")));
 
         assert_ne!(first.finalize(), second.finalize());
+    }
+
+    #[test]
+    fn scoped_snapshot_allows_outputs_but_detects_source_changes() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("report.qmd"), "source").unwrap();
+        let snapshot =
+            snapshot_project_excluding(directory.path(), &[directory.path().join("report.html")])
+                .unwrap();
+        fs::write(directory.path().join("report.html"), "generated").unwrap();
+        verify_project_snapshot(directory.path(), &snapshot).unwrap();
+
+        fs::write(directory.path().join("report.qmd"), "changed").unwrap();
+        assert!(verify_project_snapshot(directory.path(), &snapshot).is_err());
     }
 }

@@ -26,6 +26,12 @@ PY
 "$DUAL_BIN" run pycheck
 test -s dual.lock
 
+"$DUAL_BIN" init --script report.qmd --python 3.12
+"$DUAL_BIN" add --script report.qmd --python matplotlib
+"$DUAL_BIN" --trust-project run report.qmd
+test -s report.html
+grep -q "Hello from dual" report.html
+
 mkdir -p scripts/nested
 cd scripts/nested
 "$DUAL_BIN" --trust-project doctor

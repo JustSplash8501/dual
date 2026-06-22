@@ -31,16 +31,19 @@ name = "cli-tools"
 
 [r]
 version = "4.5"
-packages = [
+cran = [
   "tidyverse",
-  "cran::targets@1.11.4",
-  "bioc::DESeq2",
-  "github::r-lib/pak@v0.9.0",
+  "targets@1.11.4",
 ]
+bioc = ["DESeq2"]
+github = ["r-lib/pak@v0.9.0"]
 
 [python]
 version = "3.12"
-packages = ["pandas", "scikit-learn", "xgboost"]
+dependencies = ["pandas", "scikit-learn", "xgboost"]
+
+[quarto]
+enabled = false
 
 [tasks]
 analysis = "Rscript scripts/analysis.R"
@@ -95,7 +98,13 @@ dual remove r PACKAGE...           Remove R packages
 dual remove py PACKAGE...          Remove Python packages
 dual up                            Create or update the environment
 dual up --refresh                  Re-resolve and update the shared lockfile
-dual run TASK                      Run a configured task
+dual run TASK                      Run a configured project task
+dual run FILE                      Run a .py, .R, .qmd, or .Rmd file
+dual sync [--script FILE]          Prepare dependencies without running code
+dual deps [--script FILE]          Show effective dependencies
+dual export --requirements         Write requirements.txt
+dual export --renv                 Write an renv dependency helper
+dual export --dockerfile           Write a conservative Dockerfile
 dual task list                     List configured tasks
 dual shell                         Open a shell in the environment
 dual doctor                        Diagnose the project
@@ -104,6 +113,72 @@ dual engine update                 Update private environment support
 dual engine uninstall              Remove private environment support
 dual lock migrate                  Upgrade dual.lock to the current format
 ```
+
+## Script workflows
+
+Dual can keep dependencies next to a Python, R, Quarto, or R Markdown file:
+
+```console
+dual init --script analysis.py --python 3.12
+dual add --script analysis.py 'requests<3' rich
+dual run analysis.py
+```
+
+Python uses PEP 723-compatible metadata:
+
+```python
+# /// script
+# requires-python = ">=3.12"
+# dependencies = [
+#   "requests<3",
+#   "rich",
+# ]
+# ///
+```
+
+R uses the same block shape with R-specific fields:
+
+```r
+# /// script
+# r = ">=4.4"
+# cran = ["tidyverse", "lme4"]
+# bioc = ["DESeq2"]
+# github = ["hadley/emo"]
+# ///
+```
+
+Quarto and R Markdown use an HTML comment:
+
+```markdown
+<!-- /// script
+python = ">=3.12"
+r = ">=4.4"
+python-dependencies = ["pandas", "matplotlib"]
+cran = ["tidyverse", "knitr"]
+bioc = []
+github = []
+/// -->
+```
+
+Use `dual add --script report.qmd --python pandas` or
+`dual add --script report.qmd --r tidyverse` when a document can use both
+languages. `--index URL`, `--bioc`, and `--github OWNER/REPO` select package
+sources. `dual run FILE --dry-run` shows the plan, and `--no-install` requires
+an already prepared matching environment.
+
+When a project `dual.toml` is found above the script, Dual merges it with the
+inline metadata. Inline version requirements take precedence and dependency
+lists are combined without duplicates.
+
+Executable scripts can use this portable shebang on systems whose `env`
+supports `-S`:
+
+```text
+#!/usr/bin/env -S dual run
+```
+
+The shorter `#!/usr/bin/env dual run` form is not portable because many
+implementations treat `dual run` as one executable name.
 
 When `PROJECT_NAME` is omitted, `dual init` uses the current directory name.
 Project names must start and end with a letter or number and may contain only
@@ -218,7 +293,7 @@ the Python interpreter from the project environment.
 
 ## Generated files
 
-`dual up` creates:
+`dual up`, `dual sync`, and successful script preparation create:
 
 - `dual.lock` — the exact, shareable resolution for conda-forge, PyPI, CRAN,
   Bioconductor, and GitHub dependencies
@@ -226,8 +301,10 @@ the Python interpreter from the project environment.
 
 `.dual/` is generated locally and ignored. `dual.lock` is intentionally
 committed. It is a Dual-owned lockfile containing a neutral `environment`
-resolution and, when needed, the source-backed R resolution. Internal engine
-formats remain private implementation details under `.dual/`.
+resolution, source-backed R resolution when needed, and a stable metadata
+summary containing requested runtime versions, direct dependencies, package
+sources, and an update timestamp. Internal engine formats remain private
+implementation details under `.dual/`.
 
 When a collaborator receives `dual.toml` and `dual.lock`, `dual up` creates the
 environment with the shared resolution enforced.
@@ -259,10 +336,11 @@ banner. This allows tools such as `renv` to continue activating normally.
 
 ## Scope
 
-The MVP deliberately has no GUI, editor integration, Docker support, SLURM
-support, or special Quarto behavior. Quarto works like any other task command.
-The goal is a small, legible foundation that makes ordinary scientific
-projects easy to reproduce.
+The MVP deliberately has no GUI, editor integration, or SLURM support.
+Quarto and R Markdown files can be run directly, while Docker support is
+currently a conservative generated starting point rather than a complete
+container build system. The goal is a small, legible foundation that makes
+ordinary scientific projects easy to reproduce.
 
 ## Contributing
 

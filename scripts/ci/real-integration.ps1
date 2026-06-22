@@ -24,6 +24,15 @@ Set-Content dual.toml $config
 & $env:DUAL_BIN run pycheck
 if (-not (Test-Path dual.lock)) { throw "dual.lock was not created" }
 
+& $env:DUAL_BIN init --script report.qmd --python 3.12
+& $env:DUAL_BIN add --script report.qmd --python matplotlib
+& $env:DUAL_BIN --trust-project run report.qmd
+if (-not (Test-Path report.html)) { throw "Quarto did not create report.html" }
+$report = Get-Content report.html -Raw
+if (-not ($report -match "Hello from dual")) {
+    throw "Quarto output did not contain the executed document content"
+}
+
 New-Item -ItemType Directory -Path scripts/nested -Force | Out-Null
 Set-Location scripts/nested
 & $env:DUAL_BIN --trust-project doctor
