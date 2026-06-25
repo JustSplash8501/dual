@@ -160,7 +160,8 @@ pub enum Commands {
         command: TaskCommand,
     },
 
-    /// Manage dual's private environment support.
+    /// Manage Dual environment support.
+    #[command(hide = true)]
     Engine {
         #[command(subcommand)]
         command: EngineCommand,
@@ -194,10 +195,10 @@ pub enum TaskCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum EngineCommand {
-    /// Download and activate the currently pinned engine version.
+    /// Update Dual environment support.
     Update,
 
-    /// Remove dual's private engine installation.
+    /// Remove Dual environment support.
     Uninstall,
 }
 

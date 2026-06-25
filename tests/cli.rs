@@ -23,6 +23,20 @@ fn init_creates_expected_files() {
 }
 
 #[test]
+fn help_keeps_environment_support_commands_hidden() {
+    Command::cargo_bin("dual")
+        .unwrap()
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("engine")
+                .not()
+                .and(predicate::str::contains("private").not()),
+        );
+}
+
+#[test]
 fn init_infers_project_name_from_directory() {
     let parent = tempdir().unwrap();
     let directory = parent.path().join("inferred-project");
@@ -1212,9 +1226,7 @@ fn engine_update_and_uninstall_manage_private_engine() {
         .args(["engine", "uninstall"])
         .assert()
         .success()
-        .stdout(predicate::str::contains(
-            "Removed dual's private environment support",
-        ));
+        .stdout(predicate::str::contains("Removed Dual environment support"));
     assert!(!home.join("engine").exists());
 }
 

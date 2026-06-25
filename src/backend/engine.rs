@@ -155,7 +155,7 @@ impl EnvironmentBackend {
             if actual != expected {
                 anyhow::bail!(
                     "Dual environment support failed its integrity check. \
-                     Run `dual engine update` to replace it."
+                     The support files must be replaced before continuing."
                 );
             }
         }

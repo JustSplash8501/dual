@@ -54,9 +54,8 @@ report = "quarto render manuscript.qmd"
 ## Philosophy
 
 `dual` is not a package manager. It is a project runner and environment
-coordinator built on a proven environment engine. It provides cross-platform
-R, Python, conda-forge, PyPI, environments, and lockfiles through one focused
-interface.
+coordinator. It provides cross-platform R, Python, package resolution,
+environments, and lockfiles through one focused interface.
 
 Users edit `dual.toml`, commit `dual.lock`, and run `dual` commands. Internal
 environment state is stored under `.dual/` and should not be edited directly.
@@ -109,8 +108,6 @@ dual task list                     List configured tasks
 dual shell                         Open a shell in the environment
 dual doctor                        Diagnose the project
 dual clean [--yes]                 Remove dual-generated environment files
-dual engine update                 Update private environment support
-dual engine uninstall              Remove private environment support
 dual lock migrate                  Upgrade dual.lock to the current format
 ```
 
@@ -221,7 +218,7 @@ Without `--verbose`, output stays focused on the project.
 ## Installation
 
 Prebuilt releases install as a single `dual` command. On first use, `dual`
-automatically installs private environment support under the user's dual data
+automatically prepares the support files it needs under the user's dual data
 directory. It does not modify `PATH` or shell startup files, and users do not
 need to install a separate environment tool.
 
@@ -303,7 +300,7 @@ the Python interpreter from the project environment.
 committed. It is a Dual-owned lockfile containing a neutral `environment`
 resolution, source-backed R resolution when needed, and a stable metadata
 summary containing requested runtime versions, direct dependencies, package
-sources, and an update timestamp. Internal engine formats remain private
+sources, and an update timestamp. Internal generated formats remain
 implementation details under `.dual/`.
 
 When a collaborator receives `dual.toml` and `dual.lock`, `dual up` creates the

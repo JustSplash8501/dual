@@ -162,9 +162,9 @@ fn run() -> Result<()> {
         } => {
             let backend = EnvironmentBackend::new(&current, verbose);
             if backend.uninstall_engine()? {
-                println!("Removed dual's private environment support.");
+                println!("Removed Dual environment support.");
             } else {
-                println!("No private environment support was installed.");
+                println!("No Dual environment support was installed.");
             }
             Ok(())
         }
