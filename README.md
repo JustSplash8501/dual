@@ -96,6 +96,8 @@ dual add r PACKAGE...              Add R packages
 dual add py PACKAGE...             Add Python packages
 dual remove r PACKAGE...           Remove R packages
 dual remove py PACKAGE...          Remove Python packages
+dual import FILE                   Import requirements.txt, renv.lock, env.lock,
+                                   uv.lock, or environment.yml
 dual up                            Create or update the environment
 dual up --refresh                  Re-resolve and update the shared lockfile
 dual run TASK                      Run a configured project task
@@ -104,7 +106,7 @@ dual sync [--script FILE]          Prepare dependencies without running code
 dual deps [--script FILE]          Show effective dependencies
 dual export --requirements         Write requirements.txt
 dual export --renv                 Write an renv dependency helper
-dual export --dockerfile           Write a conservative Dockerfile
+dual export --dockerfile           Write a Dockerfile and .dockerignore
 dual task list                     List configured tasks
 dual shell                         Open a shell in the environment
 dual doctor                        Diagnose the project
@@ -113,6 +115,33 @@ dual engine update                 Update private environment support
 dual engine uninstall              Remove private environment support
 dual lock migrate                  Upgrade dual.lock to the current format
 ```
+
+Inspection commands such as `dual deps`, `dual task list`, `dual doctor`, and
+`dual import FILE` accept `--json` for machine-readable output.
+
+Tasks can be simple command strings or dependency-aware tables:
+
+```toml
+[tasks]
+prepare = "python scripts/prepare.py"
+analysis = { cmd = "Rscript scripts/analysis.R", deps = ["prepare"] }
+```
+
+When you run `dual run analysis`, Dual runs `prepare` first and rejects
+dependency cycles.
+
+Existing projects can be brought into Dual with:
+
+```console
+dual import requirements.txt
+dual import renv.lock
+dual import uv.lock
+dual import environment.yml
+dual import env.lock
+```
+
+Imports add the dependencies Dual can model today and report skipped entries
+such as unsupported conda packages or direct URL requirements.
 
 ## Script workflows
 
@@ -337,10 +366,12 @@ banner. This allows tools such as `renv` to continue activating normally.
 ## Scope
 
 The MVP deliberately has no GUI, editor integration, or SLURM support.
-Quarto and R Markdown files can be run directly, while Docker support is
-currently a conservative generated starting point rather than a complete
-container build system. The goal is a small, legible foundation that makes
-ordinary scientific projects easy to reproduce.
+Quarto and R Markdown files can be run directly. Docker export writes a
+reviewable starting point with a language-appropriate base image, inline
+Python/R dependency installation, and a `.dockerignore` that excludes generated
+Dual state. It is still not a complete container build system. The goal is a
+small, legible foundation that makes ordinary scientific projects easy to
+reproduce.
 
 ## Contributing
 

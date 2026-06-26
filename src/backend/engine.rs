@@ -1245,11 +1245,11 @@ pub fn generate_manifest(config: &Config, root: &Path) -> Result<String> {
                 tasks: config
                     .tasks
                     .iter()
-                    .map(|(name, command)| {
+                    .map(|(name, task)| {
                         (
                             name.clone(),
                             TaskSpec {
-                                cmd: command.clone(),
+                                cmd: task.command().to_owned(),
                                 cwd: project_root.clone(),
                             },
                         )
@@ -1797,7 +1797,9 @@ fn clear_engine_markers(root: &Path) -> Result<()> {
 mod tests {
     use std::collections::BTreeMap;
 
-    use crate::config::{PackageIndex, ProjectConfig, PythonConfig, QuartoConfig, RConfig};
+    use crate::config::{
+        PackageIndex, ProjectConfig, PythonConfig, QuartoConfig, RConfig, TaskConfig,
+    };
 
     use super::*;
 
@@ -1824,7 +1826,10 @@ mod tests {
                 index: vec![],
             },
             quarto: QuartoConfig::default(),
-            tasks: BTreeMap::from([("analysis".into(), "Rscript scripts/analysis.R".into())]),
+            tasks: BTreeMap::from([(
+                "analysis".into(),
+                TaskConfig::simple("Rscript scripts/analysis.R"),
+            )]),
         }
     }
 

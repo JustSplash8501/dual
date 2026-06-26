@@ -3,6 +3,7 @@ use clap::Parser;
 use dual::backend::{Backend, EnvironmentBackend};
 use dual::cli::{Cli, Commands, EngineCommand, Language, LockCommand, TaskCommand};
 use dual::config::{validate_project_name, Config, DEFAULT_CONFIG};
+use dual::imports;
 use dual::metadata::{self, AddOptions, ScriptLanguage};
 use dual::workflows::{self, ExportFormat};
 use dual::{doctor, security, tasks};
@@ -20,6 +21,7 @@ fn run() -> Result<()> {
     let current = std::env::current_dir()?;
     let verbose = cli.verbose;
     let trust_project = cli.trust_project;
+    let json = cli.json;
 
     match cli.command {
         Commands::Init {
@@ -88,6 +90,10 @@ fn run() -> Result<()> {
             let root = Config::find_root(&current)?;
             remove(&root, language, &packages)
         }
+        Commands::Import { file } => {
+            let root = Config::find_root(&current)?;
+            import(&root, &file, json)
+        }
         Commands::Up { refresh } => {
             let root = Config::find_root(&current)?;
             let backend = EnvironmentBackend::new(&root, verbose);
@@ -125,10 +131,10 @@ fn run() -> Result<()> {
         }
         Commands::Deps { script } => {
             if let Some(script) = script {
-                workflows::show_script_dependencies(&script)
+                workflows::show_script_dependencies(&script, json)
             } else {
                 let root = Config::find_root(&current)?;
-                workflows::show_project_dependencies(&root)
+                workflows::show_project_dependencies(&root, json)
             }
         }
         Commands::Export {
@@ -152,7 +158,7 @@ fn run() -> Result<()> {
             command: TaskCommand::List,
         } => {
             let root = Config::find_root(&current)?;
-            tasks::list_tasks(&root)
+            tasks::list_tasks(&root, json)
         }
         Commands::Engine {
             command: EngineCommand::Update,
@@ -195,9 +201,9 @@ fn run() -> Result<()> {
                     backend.verify_manifest(&config)?;
                     security::verify_project_unchanged(&root, &trust)?;
                 }
-                doctor::run(&root, &backend)
+                doctor::run(&root, &backend, json)
             } else {
-                doctor::run_system()
+                doctor::run_system(json)
             }
         }
         Commands::Clean { yes } => {
@@ -206,6 +212,39 @@ fn run() -> Result<()> {
             clean(&root, &backend, yes)
         }
     }
+}
+
+fn import(root: &std::path::Path, file: &std::path::Path, json: bool) -> Result<()> {
+    security::reject_symlink_if_present(&Config::path(root), "dual.toml")?;
+    let preserve_trust = security::project_is_trusted(root)?;
+    let report = imports::import_file(root, file)?;
+    if preserve_trust {
+        security::refresh_project_trust(root)?;
+    }
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!("Imported dependencies from {}.", report.source);
+        if let Some(version) = &report.python_version {
+            println!("Python version: {version}");
+        }
+        if !report.python.is_empty() {
+            println!("Python packages: {}", report.python.join(", "));
+        }
+        if let Some(version) = &report.r_version {
+            println!("R version: {version}");
+        }
+        if !report.r.is_empty() {
+            println!("R packages: {}", report.r.join(", "));
+        }
+        if !report.skipped.is_empty() {
+            println!("Skipped unsupported entries: {}", report.skipped.join(", "));
+        }
+        if root.join("dual.lock").is_file() {
+            println!("Run `dual up --refresh` to update the shared environment lock.");
+        }
+    }
+    Ok(())
 }
 
 fn parse_project_add_items(items: &[String]) -> Result<(Language, &[String])> {

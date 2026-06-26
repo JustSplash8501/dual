@@ -19,6 +19,10 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub trust_project: bool,
 
+    /// Emit machine-readable JSON for supported commands.
+    #[arg(long, global = true)]
+    pub json: bool,
+
     #[command(subcommand)]
     pub command: Commands,
 }
@@ -92,6 +96,13 @@ pub enum Commands {
         /// One or more package names.
         #[arg(required = true, num_args = 1..)]
         packages: Vec<String>,
+    },
+
+    /// Import dependencies from an existing environment or lock file.
+    Import {
+        /// requirements.txt, renv.lock, env.lock, uv.lock, or environment.yml.
+        #[arg(value_name = "FILE")]
+        file: PathBuf,
     },
 
     /// Create or update the project environment.

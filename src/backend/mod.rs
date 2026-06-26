@@ -8,7 +8,7 @@ use crate::config::Config;
 
 pub use engine::{generate_manifest, EnvironmentBackend};
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize)]
 pub struct BackendReport {
     pub available: bool,
     pub environment_present: bool,
@@ -20,7 +20,7 @@ pub struct BackendReport {
     pub bridge: Option<BridgeReport>,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize)]
 pub struct BridgeReport {
     pub reticulate_installed: bool,
     pub uses_project_python: bool,

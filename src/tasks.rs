@@ -1,14 +1,16 @@
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use anyhow::Result;
+use serde::Serialize;
 
 use crate::backend::Backend;
-use crate::config::Config;
+use crate::config::{Config, TaskConfig};
 use crate::errors::DualError;
 use crate::security;
 
-pub fn lookup<'a>(config: &'a Config, name: &str) -> Result<&'a str> {
-    config.tasks.get(name).map(String::as_str).ok_or_else(|| {
+pub fn lookup<'a>(config: &'a Config, name: &str) -> Result<&'a TaskConfig> {
+    config.tasks.get(name).ok_or_else(|| {
         let available = if config.tasks.is_empty() {
             ". No tasks are configured in [tasks].".to_owned()
         } else {
@@ -32,7 +34,7 @@ pub fn run_task(
     trust_project: bool,
 ) -> Result<()> {
     let config = Config::load(root)?;
-    lookup(&config, name)?;
+    let task_order = resolve_task_order(&config, name)?;
 
     if !backend.environment_exists() {
         anyhow::bail!("The project environment has not been created. Run `dual up` first.");
@@ -42,21 +44,80 @@ pub fn run_task(
     backend.verify_manifest(&config)?;
     security::verify_project_unchanged(root, &trust)?;
 
-    println!("Running task `{name}`...");
-    backend.run(&config, name)?;
+    for task in &task_order {
+        println!("Running task `{task}`...");
+        backend.run(&config, task)?;
+    }
     security::verify_project_unchanged(root, &trust)
 }
 
-pub fn list_tasks(root: &Path) -> Result<()> {
+pub fn list_tasks(root: &Path, json: bool) -> Result<()> {
     let config = Config::load(root)?;
-    if config.tasks.is_empty() {
+    if json {
+        let tasks = config
+            .tasks
+            .iter()
+            .map(|(name, task)| TaskReport {
+                name: name.clone(),
+                command: task.command().to_owned(),
+                deps: task.deps().to_vec(),
+            })
+            .collect::<Vec<_>>();
+        println!("{}", serde_json::to_string_pretty(&tasks)?);
+    } else if config.tasks.is_empty() {
         println!("No tasks are configured.");
     } else {
-        for (name, command) in config.tasks {
-            println!("{name}\t{command}");
+        for (name, task) in config.tasks {
+            if task.deps().is_empty() {
+                println!("{name}\t{}", task.command());
+            } else {
+                println!(
+                    "{name}\t{}\tdeps: {}",
+                    task.command(),
+                    task.deps().join(", ")
+                );
+            }
         }
     }
     Ok(())
+}
+
+fn resolve_task_order(config: &Config, name: &str) -> Result<Vec<String>> {
+    let mut ordered = Vec::new();
+    let mut visiting = BTreeSet::new();
+    let mut visited = BTreeSet::new();
+    visit_task(config, name, &mut visiting, &mut visited, &mut ordered)?;
+    Ok(ordered)
+}
+
+fn visit_task(
+    config: &Config,
+    name: &str,
+    visiting: &mut BTreeSet<String>,
+    visited: &mut BTreeSet<String>,
+    ordered: &mut Vec<String>,
+) -> Result<()> {
+    if visited.contains(name) {
+        return Ok(());
+    }
+    let task = lookup(config, name)?;
+    if !visiting.insert(name.to_owned()) {
+        anyhow::bail!("task dependency cycle includes `{name}`");
+    }
+    for dependency in task.deps() {
+        visit_task(config, dependency, visiting, visited, ordered)?;
+    }
+    visiting.remove(name);
+    visited.insert(name.to_owned());
+    ordered.push(name.to_owned());
+    Ok(())
+}
+
+#[derive(Serialize)]
+struct TaskReport {
+    name: String,
+    command: String,
+    deps: Vec<String>,
 }
 
 #[cfg(test)]
@@ -84,14 +145,17 @@ mod tests {
                 index: vec![],
             },
             quarto: QuartoConfig::default(),
-            tasks: BTreeMap::from([("analysis".into(), "Rscript scripts/analysis.R".into())]),
+            tasks: BTreeMap::from([(
+                "analysis".into(),
+                TaskConfig::simple("Rscript scripts/analysis.R"),
+            )]),
         }
     }
 
     #[test]
     fn task_lookup_works() {
         assert_eq!(
-            lookup(&config(), "analysis").unwrap(),
+            lookup(&config(), "analysis").unwrap().command(),
             "Rscript scripts/analysis.R"
         );
     }

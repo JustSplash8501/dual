@@ -44,7 +44,7 @@ pub struct Config {
     #[serde(default)]
     pub quarto: QuartoConfig,
     #[serde(default)]
-    pub tasks: BTreeMap<String, String>,
+    pub tasks: BTreeMap<String, TaskConfig>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -83,6 +83,41 @@ pub struct RConfig {
 pub struct QuartoConfig {
     #[serde(default)]
     pub enabled: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum TaskConfig {
+    Command(String),
+    Detailed(TaskDetails),
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TaskDetails {
+    pub cmd: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deps: Vec<String>,
+}
+
+impl TaskConfig {
+    pub fn simple(command: impl Into<String>) -> Self {
+        Self::Command(command.into())
+    }
+
+    pub fn command(&self) -> &str {
+        match self {
+            Self::Command(command) => command,
+            Self::Detailed(details) => &details.cmd,
+        }
+    }
+
+    pub fn deps(&self) -> &[String] {
+        match self {
+            Self::Command(_) => &[],
+            Self::Detailed(details) => &details.deps,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -336,8 +371,8 @@ impl Config {
         for index in &self.python.index {
             validate_index_url(&index.url)?;
         }
-        for (name, command) in &self.tasks {
-            if name.trim().is_empty() || command.trim().is_empty() {
+        for (name, task) in &self.tasks {
+            if name.trim().is_empty() || task.command().trim().is_empty() {
                 return Err(DualError::InvalidConfig(
                     "task names and commands cannot be empty".into(),
                 )
@@ -349,7 +384,16 @@ impl Config {
                 );
             }
             reject_control_characters("task name", name)?;
-            reject_control_characters("task command", command)?;
+            reject_control_characters("task command", task.command())?;
+            for dependency in task.deps() {
+                if dependency.trim().is_empty() {
+                    return Err(DualError::InvalidConfig(
+                        "task dependencies cannot be empty".into(),
+                    )
+                    .into());
+                }
+                reject_control_characters("task dependency", dependency)?;
+            }
         }
         Ok(())
     }
@@ -695,6 +739,10 @@ fn valid_distribution_name(value: &str) -> bool {
         })
 }
 
+pub fn valid_distribution_name_for_import(value: &str) -> bool {
+    valid_distribution_name(value)
+}
+
 pub fn valid_version_specifier(value: &str) -> bool {
     value == "*"
         || (!value.chars().any(char::is_whitespace)
@@ -829,7 +877,7 @@ enabled = true
         let mut config: Config = toml::from_str(DEFAULT_CONFIG).unwrap();
         config
             .tasks
-            .insert("unsafe".into(), "echo\u{7}danger".into());
+            .insert("unsafe".into(), TaskConfig::simple("echo\u{7}danger"));
         assert!(config.validate().is_err());
     }
 
