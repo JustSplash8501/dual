@@ -117,6 +117,10 @@ pub enum Commands {
         /// Task name from [tasks], or a .py, .R, .qmd, or .Rmd file.
         target: String,
 
+        /// Arguments passed to the script or task after `--`.
+        #[arg(last = true, value_name = "ARG")]
+        args: Vec<String>,
+
         /// Refuse to install or update an environment.
         #[arg(long)]
         no_install: bool,

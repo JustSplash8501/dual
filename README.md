@@ -130,6 +130,13 @@ analysis = { cmd = "Rscript scripts/analysis.R", deps = ["prepare"] }
 When you run `dual run analysis`, Dual runs `prepare` first and rejects
 dependency cycles.
 
+Pass script or task arguments after `--`:
+
+```console
+dual run analysis.py -- --input data.csv --limit 10
+dual run analysis -- --input data.csv --limit 10
+```
+
 Existing projects can be brought into Dual with:
 
 ```console

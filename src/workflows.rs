@@ -24,6 +24,7 @@ pub fn looks_like_script(target: &str) -> bool {
 
 pub fn run_script(
     path: &Path,
+    args: &[String],
     verbose: bool,
     trust_project: bool,
     no_install: bool,
@@ -42,7 +43,7 @@ pub fn run_script(
             &effective.config,
             Some(effective.source.to_string().as_str()),
         );
-        println!("Would run: {}", command.command());
+        println!("Would run: {}", command_with_args(command.command(), args));
         return Ok(());
     }
 
@@ -73,11 +74,19 @@ pub fn run_script(
             )
         })
         .transpose()?;
-    backend.run(&effective.config, SCRIPT_TASK)?;
+    backend.run(&effective.config, SCRIPT_TASK, args)?;
     if let Some(snapshot) = document_snapshot {
         security::verify_project_snapshot(&effective.root, &snapshot)
     } else {
         security::verify_project_unchanged(&effective.root, &trust)
+    }
+}
+
+fn command_with_args(command: &str, args: &[String]) -> String {
+    if args.is_empty() {
+        command.to_owned()
+    } else {
+        format!("{command} {}", args.join(" "))
     }
 }
 
@@ -388,20 +397,15 @@ pub fn export(root: &Path, format: ExportFormat) -> Result<PathBuf> {
                 "debian:bookworm-slim".to_owned()
             };
             let system_packages = if config.r.enabled && config.python.enabled {
-                "RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-pip git build-essential ca-certificates && rm -rf /var/lib/apt/lists/*\n"
+                "RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-venv git build-essential ca-certificates && rm -rf /var/lib/apt/lists/*\nRUN python3 -m venv /opt/dual-python\nENV PATH=\"/opt/dual-python/bin:${PATH}\"\n"
             } else {
                 "RUN apt-get update && apt-get install -y --no-install-recommends git build-essential ca-certificates && rm -rf /var/lib/apt/lists/*\n"
             };
             let python_install = if config.python.packages.is_empty() {
                 String::new()
             } else {
-                let installer = if config.r.enabled {
-                    "python3 -m pip"
-                } else {
-                    "python -m pip"
-                };
                 format!(
-                    "RUN <<'EOF'\ncat > /tmp/requirements.txt <<'REQ'\n{}REQ\n{installer} install --no-cache-dir -r /tmp/requirements.txt\nEOF\n",
+                    "RUN <<'EOF'\ncat > /tmp/requirements.txt <<'REQ'\n{}REQ\npython -m pip install --no-cache-dir -r /tmp/requirements.txt\nEOF\n",
                     config.python.packages.join("\n") + "\n"
                 )
             };

@@ -36,7 +36,7 @@ pub trait Backend {
     fn verify_manifest(&self, config: &Config) -> Result<()>;
     fn init_or_update(&self, config: &Config, refresh: bool) -> Result<()>;
     fn validate(&self, config: &Config) -> Result<()>;
-    fn run(&self, config: &Config, task: &str) -> Result<()>;
+    fn run(&self, config: &Config, task: &str, args: &[String]) -> Result<()>;
     fn shell(&self, config: &Config) -> Result<()>;
     fn clean(&self) -> Result<Vec<PathBuf>>;
     fn doctor(&self, config: &Config) -> Result<BackendReport>;

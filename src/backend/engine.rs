@@ -826,22 +826,25 @@ impl Backend for EnvironmentBackend {
         Ok(())
     }
 
-    fn run(&self, config: &Config, task: &str) -> Result<()> {
+    fn run(&self, config: &Config, task: &str, args: &[String]) -> Result<()> {
         self.verify_manifest(config)?;
         self.ensure_state_paths_safe()?;
         self.stage_lock()?;
         let manifest = self.manifest_arg();
-        let result = self.execute_task(
-            &[
-                "run",
-                "--manifest-path",
-                &manifest,
-                "--locked",
-                "--quiet",
-                task,
-            ],
-            task,
-        );
+        let mut run_args = vec![
+            "run".to_owned(),
+            "--manifest-path".to_owned(),
+            manifest,
+            "--locked".to_owned(),
+            "--quiet".to_owned(),
+            task.to_owned(),
+        ];
+        if !args.is_empty() {
+            run_args.push("--".to_owned());
+            run_args.extend(args.iter().cloned());
+        }
+        let run_args = run_args.iter().map(String::as_str).collect::<Vec<_>>();
+        let result = self.execute_task(&run_args, task);
         self.finish_lock()?;
         result
     }

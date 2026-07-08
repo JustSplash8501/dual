@@ -316,6 +316,9 @@ fn export_commands_write_conservative_files() {
     }
     let dockerfile = fs::read_to_string(directory.path().join("Dockerfile")).unwrap();
     assert!(dockerfile.contains("cat > /tmp/requirements.txt"));
+    assert!(dockerfile.contains("python3 -m venv /opt/dual-python"));
+    assert!(dockerfile.contains("ENV PATH=\"/opt/dual-python/bin:${PATH}\""));
+    assert!(dockerfile.contains("python -m pip install --no-cache-dir"));
     assert!(fs::read_to_string(directory.path().join(".dockerignore"))
         .unwrap()
         .contains(".dual/"));
@@ -1116,6 +1119,38 @@ fn run_executes_task_dependencies_first() {
 
 #[cfg(unix)]
 #[test]
+fn run_forwards_trailing_args_to_the_requested_task() {
+    let fixture = backend_fixture();
+    fs::write(
+        fixture.project.path().join("dual.toml"),
+        fs::read_to_string(fixture.project.path().join("dual.toml"))
+            .unwrap()
+            .replace(
+                "[tasks]\n",
+                "[tasks]\nprepare = \"python prepare.py\"\nanalysis = { cmd = \"python analysis.py\", deps = [\"prepare\"] }\n",
+            ),
+    )
+    .unwrap();
+    write_ready_environment(fixture.project.path());
+    write_test_lock(fixture.project.path(), "lock");
+
+    dual_command(&fixture)
+        .args([
+            "run", "analysis", "--", "--input", "data.csv", "--limit", "10",
+        ])
+        .assert()
+        .success();
+
+    let log = fs::read_to_string(&fixture.log).unwrap();
+    assert!(log.contains(" prepare\n"), "{log}");
+    assert!(
+        log.contains(" analysis -- --input data.csv --limit 10\n"),
+        "{log}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn run_script_prepares_environment_executes_and_records_lock_metadata() {
     let fixture = backend_fixture();
     fs::write(
@@ -1148,6 +1183,31 @@ fn run_script_prepares_environment_executes_and_records_lock_metadata() {
     assert_eq!(lock["metadata"]["python"]["requested"], ">=3.12");
     assert_eq!(lock["metadata"]["python"]["dependencies"][0], "rich");
     assert!(lock["metadata"]["timestamp"].is_number());
+}
+
+#[test]
+fn run_script_dry_run_shows_trailing_args() {
+    let directory = initialized_project();
+    fs::write(directory.path().join("analysis.py"), "print('ok')\n").unwrap();
+
+    Command::cargo_bin("dual")
+        .unwrap()
+        .current_dir(directory.path())
+        .args([
+            "run",
+            "analysis.py",
+            "--dry-run",
+            "--",
+            "--input",
+            "data.csv",
+            "--limit",
+            "10",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Would run: python \"analysis.py\" --input data.csv --limit 10",
+        ));
 }
 
 #[cfg(unix)]

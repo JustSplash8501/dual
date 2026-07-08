@@ -31,6 +31,7 @@ pub fn run_task(
     root: &Path,
     backend: &impl Backend,
     name: &str,
+    args: &[String],
     trust_project: bool,
 ) -> Result<()> {
     let config = Config::load(root)?;
@@ -46,7 +47,8 @@ pub fn run_task(
 
     for task in &task_order {
         println!("Running task `{task}`...");
-        backend.run(&config, task)?;
+        let task_args = if task == name { args } else { &[] };
+        backend.run(&config, task, task_args)?;
     }
     security::verify_project_unchanged(root, &trust)
 }

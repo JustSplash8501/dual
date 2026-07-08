@@ -101,12 +101,14 @@ fn run() -> Result<()> {
         }
         Commands::Run {
             target,
+            args,
             no_install,
             dry_run,
         } => {
             if workflows::looks_like_script(&target) {
                 workflows::run_script(
                     Path::new(&target),
+                    &args,
                     verbose,
                     trust_project,
                     no_install,
@@ -118,7 +120,7 @@ fn run() -> Result<()> {
                 }
                 let root = Config::find_root(&current)?;
                 let backend = EnvironmentBackend::new(&root, verbose);
-                tasks::run_task(&root, &backend, &target, trust_project)
+                tasks::run_task(&root, &backend, &target, &args, trust_project)
             }
         }
         Commands::Sync { script, dry_run } => {
