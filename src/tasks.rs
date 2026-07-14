@@ -16,7 +16,7 @@ pub fn lookup<'a>(config: &'a Config, name: &str) -> Result<&'a TaskConfig> {
         } else {
             format!(
                 ". Available tasks: {}",
-                config.tasks.keys().cloned().collect::<Vec<_>>().join(", ")
+                join_task_names(config.tasks.keys())
             )
         };
         DualError::MissingTask {
@@ -113,6 +113,17 @@ fn visit_task(
     visited.insert(name.to_owned());
     ordered.push(name.to_owned());
     Ok(())
+}
+
+fn join_task_names<'a>(names: impl Iterator<Item = &'a String>) -> String {
+    let mut joined = String::new();
+    for name in names {
+        if !joined.is_empty() {
+            joined.push_str(", ");
+        }
+        joined.push_str(name);
+    }
+    joined
 }
 
 #[derive(Serialize)]

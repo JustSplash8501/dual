@@ -154,22 +154,22 @@ pub fn contains_control_characters(value: &str) -> bool {
 }
 
 pub fn ensure_project_trusted(root: &Path, authorize: bool) -> Result<ProjectTrust> {
-    let fingerprint = project_fingerprint(root, true)?;
-    let trust_path = trust_path(root)?;
-    let trusted = read_trust_record(&trust_path)
-        .is_ok_and(|record| constant_time_eq(record.trim().as_bytes(), fingerprint.as_bytes()));
+    let fingerprints = project_fingerprints(root)?;
+    let trusted = read_trust_record(&fingerprints.trust_path).is_ok_and(|record| {
+        constant_time_eq(record.trim().as_bytes(), fingerprints.trust.as_bytes())
+    });
     let authorized_by_environment = env::var("DUAL_TRUST_PROJECT")
         .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "yes"));
 
     if trusted {
         return Ok(ProjectTrust {
-            execution_fingerprint: project_fingerprint(root, false)?,
+            execution_fingerprint: fingerprints.execution,
         });
     }
     if authorize || authorized_by_environment {
-        write_trust_record(&trust_path, &fingerprint)?;
+        write_trust_record(&fingerprints.trust_path, &fingerprints.trust)?;
         return Ok(ProjectTrust {
-            execution_fingerprint: project_fingerprint(root, false)?,
+            execution_fingerprint: fingerprints.execution,
         });
     }
 
@@ -244,6 +244,39 @@ fn project_fingerprint(root: &Path, include_lock: bool) -> Result<String> {
     project_fingerprint_excluding(root, include_lock, &[])
 }
 
+struct ProjectFingerprints {
+    trust: String,
+    execution: String,
+    trust_path: PathBuf,
+}
+
+fn project_fingerprints(root: &Path) -> Result<ProjectFingerprints> {
+    let canonical = fs::canonicalize(root)
+        .with_context(|| format!("could not canonicalize project root {}", root.display()))?;
+    let dual_home = excluded_dual_home_relative(&canonical);
+    let mut trust = ProjectHasher::new(&canonical);
+    let mut execution = ProjectHasher::without_lock(&canonical);
+    let mut files = 0;
+    let mut bytes = 0;
+    hash_project_directory(
+        &HashContext {
+            root,
+            include_lock: true,
+            excluded: &[],
+            excluded_dual_home: dual_home.as_deref(),
+        },
+        root,
+        &mut [&mut trust, &mut execution],
+        &mut files,
+        &mut bytes,
+    )?;
+    Ok(ProjectFingerprints {
+        trust: trust.finish(),
+        execution: execution.finish(),
+        trust_path: trust_path_for_canonical_root(&canonical),
+    })
+}
+
 fn project_fingerprint_excluding(
     root: &Path,
     include_lock: bool,
@@ -251,30 +284,79 @@ fn project_fingerprint_excluding(
 ) -> Result<String> {
     let canonical = fs::canonicalize(root)
         .with_context(|| format!("could not canonicalize project root {}", root.display()))?;
-    let mut hasher = Sha256::new();
-    hasher.update(b"dual-project-trust-v2\0");
-    hash_path(&mut hasher, &canonical);
-    hasher.update([0]);
+    let dual_home = excluded_dual_home_relative(&canonical);
+    let mut hasher = ProjectHasher::new(&canonical);
     let mut files = 0;
     let mut bytes = 0;
     hash_project_directory(
+        &HashContext {
+            root,
+            include_lock,
+            excluded,
+            excluded_dual_home: dual_home.as_deref(),
+        },
         root,
-        root,
-        include_lock,
-        excluded,
-        &mut hasher,
+        &mut [&mut hasher],
         &mut files,
         &mut bytes,
     )?;
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(hasher.finish())
+}
+
+struct HashContext<'a> {
+    root: &'a Path,
+    include_lock: bool,
+    excluded: &'a [PathBuf],
+    excluded_dual_home: Option<&'a Path>,
+}
+
+struct ProjectHasher {
+    hasher: Sha256,
+    include_lock: bool,
+}
+
+impl ProjectHasher {
+    fn new(root: &Path) -> Self {
+        let mut hasher = Sha256::new();
+        hasher.update(b"dual-project-trust-v2\0");
+        hash_path(&mut hasher, root);
+        hasher.update([0]);
+        Self {
+            hasher,
+            include_lock: true,
+        }
+    }
+
+    fn without_lock(root: &Path) -> Self {
+        let mut hasher = Self::new(root);
+        hasher.include_lock = false;
+        hasher
+    }
+
+    fn hashes_file(&self, relative: &Path) -> bool {
+        self.include_lock || relative != Path::new("dual.lock")
+    }
+
+    fn start_file(&mut self, relative: &Path, size: u64) {
+        self.hasher.update(b"file\0");
+        hash_path(&mut self.hasher, relative);
+        self.hasher.update([0]);
+        self.hasher.update(size.to_le_bytes());
+    }
+
+    fn update_file_contents(&mut self, contents: &[u8]) {
+        self.hasher.update(contents);
+    }
+
+    fn finish(self) -> String {
+        format!("{:x}", self.hasher.finalize())
+    }
 }
 
 fn hash_project_directory(
-    root: &Path,
+    context: &HashContext<'_>,
     directory: &Path,
-    include_lock: bool,
-    excluded: &[PathBuf],
-    hasher: &mut Sha256,
+    hashers: &mut [&mut ProjectHasher],
     files: &mut usize,
     bytes: &mut u64,
 ) -> Result<()> {
@@ -291,10 +373,11 @@ fn hash_project_directory(
     for entry in entries {
         let path = entry.path();
         let relative = path
-            .strip_prefix(root)
+            .strip_prefix(context.root)
             .with_context(|| format!("project path escaped its root: {}", path.display()))?;
         let first = relative.components().next();
-        if excluded
+        if context
+            .excluded
             .iter()
             .any(|excluded| relative == excluded || relative.starts_with(excluded))
         {
@@ -303,8 +386,10 @@ fn hash_project_directory(
         if matches!(
             first,
             Some(Component::Normal(name)) if name == ".git" || name == ".dual" || name == "results"
-        ) || (!include_lock && relative == Path::new("dual.lock"))
-            || excluded_dual_home(root, &path)
+        ) || (!context.include_lock && relative == Path::new("dual.lock"))
+            || context
+                .excluded_dual_home
+                .is_some_and(|dual_home| relative.starts_with(dual_home))
         {
             continue;
         }
@@ -318,7 +403,7 @@ fn hash_project_directory(
             );
         }
         if metadata.is_dir() {
-            hash_project_directory(root, &path, include_lock, excluded, hasher, files, bytes)?;
+            hash_project_directory(context, &path, hashers, files, bytes)?;
             continue;
         }
         if !metadata.is_file() {
@@ -339,19 +424,24 @@ fn hash_project_directory(
             );
         }
 
-        hasher.update(b"file\0");
-        hash_path(hasher, relative);
-        hasher.update([0]);
-        hasher.update(metadata.len().to_le_bytes());
         let mut file = open_read_no_follow(&path)
             .with_context(|| format!("could not read project file {}", path.display()))?;
+        for hasher in hashers.iter_mut() {
+            if hasher.hashes_file(relative) {
+                hasher.start_file(relative, metadata.len());
+            }
+        }
         let mut buffer = [0_u8; 64 * 1024];
         loop {
             let read = file.read(&mut buffer)?;
             if read == 0 {
                 break;
             }
-            hasher.update(&buffer[..read]);
+            for hasher in hashers.iter_mut() {
+                if hasher.hashes_file(relative) {
+                    hasher.update_file_contents(&buffer[..read]);
+                }
+            }
         }
         if file.metadata()?.len() != metadata.len() {
             anyhow::bail!(
@@ -363,11 +453,12 @@ fn hash_project_directory(
     Ok(())
 }
 
-fn excluded_dual_home(root: &Path, path: &Path) -> bool {
+fn excluded_dual_home_relative(root: &Path) -> Option<PathBuf> {
     let home = normalize_identity_path(&default_dual_home());
-    let root = normalize_identity_path(root);
-    let path = normalize_identity_path(path);
-    home.is_absolute() && home.starts_with(root) && path.starts_with(home)
+    home.is_absolute()
+        .then(|| home.strip_prefix(root).ok().map(Path::to_path_buf))
+        .flatten()
+        .filter(|path| !path.as_os_str().is_empty())
 }
 
 fn normalize_identity_path(path: &Path) -> PathBuf {
@@ -409,12 +500,16 @@ fn normalize_lexical_path(path: &Path) -> PathBuf {
 fn trust_path(root: &Path) -> Result<PathBuf> {
     let canonical = fs::canonicalize(root)
         .with_context(|| format!("could not canonicalize project root {}", root.display()))?;
+    Ok(trust_path_for_canonical_root(&canonical))
+}
+
+fn trust_path_for_canonical_root(canonical: &Path) -> PathBuf {
     let mut hasher = Sha256::new();
-    hash_path(&mut hasher, &canonical);
+    hash_path(&mut hasher, canonical);
     let key = hasher.finalize();
-    Ok(default_dual_home()
+    default_dual_home()
         .join("trust")
-        .join(format!("{key:x}.sha256")))
+        .join(format!("{key:x}.sha256"))
 }
 
 fn hash_path(hasher: &mut Sha256, path: &Path) {
@@ -541,5 +636,25 @@ mod tests {
 
         fs::write(directory.path().join("report.qmd"), "changed").unwrap();
         assert!(verify_project_snapshot(directory.path(), &snapshot).is_err());
+    }
+
+    #[test]
+    fn combined_project_fingerprints_match_single_fingerprints() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("dual.toml"), "config").unwrap();
+        fs::write(directory.path().join("dual.lock"), "lock").unwrap();
+
+        let combined = project_fingerprints(directory.path()).unwrap();
+
+        assert_eq!(
+            combined.trust,
+            project_fingerprint(directory.path(), true).unwrap()
+        );
+        assert_eq!(
+            combined.execution,
+            project_fingerprint(directory.path(), false).unwrap()
+        );
+        assert_eq!(combined.trust_path, trust_path(directory.path()).unwrap());
+        assert_ne!(combined.trust, combined.execution);
     }
 }

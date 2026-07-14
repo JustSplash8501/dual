@@ -1,4 +1,5 @@
-use std::collections::BTreeMap;
+use std::borrow::Cow;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 #[cfg(test)]
@@ -433,9 +434,13 @@ impl Config {
             };
             append_to_array(table, key, packages.iter().map(String::as_str))?;
         } else {
+            let mut grouped = BTreeMap::<&str, Vec<&str>>::new();
             for package in packages {
                 let (key, value) = project_r_package(package);
-                append_to_array(table, key, std::iter::once(value))?;
+                grouped.entry(key).or_default().push(value);
+            }
+            for (key, values) in grouped {
+                append_to_array(table, key, values.into_iter())?;
             }
         }
         security::write_file_atomic(path, document.to_string().as_bytes(), "dual.toml")?;
@@ -458,36 +463,28 @@ impl Config {
             .get_mut(section)
             .and_then(Item::as_table_mut)
             .ok_or_else(|| DualError::InvalidConfig(format!("[{section}] is required")))?;
-        let keys = if section == "python" {
-            vec!["dependencies", "packages"]
+        let keys: &[&str] = if section == "python" {
+            &["dependencies", "packages"]
         } else {
-            vec!["cran", "bioc", "github", "packages"]
+            &["cran", "bioc", "github", "packages"]
         };
+        let requested = packages.iter().map(String::as_str).collect::<BTreeSet<_>>();
         let mut removed = 0;
         for key in keys {
             let Some(array) = table.get_mut(key).and_then(Item::as_array_mut) else {
                 continue;
             };
-            let existing = array
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_owned)
-                .collect::<Vec<_>>();
-            let retained = existing
-                .iter()
-                .filter(|package| {
-                    let canonical = canonical_project_package(section, key, package);
-                    !packages
-                        .iter()
-                        .any(|requested| requested == *package || requested == &canonical)
-                })
-                .cloned()
-                .collect::<Vec<_>>();
-            removed += existing.len() - retained.len();
             let mut replacement = Array::new();
-            for package in retained {
-                replacement.push(package);
+            let mut key_removed = 0;
+            for package in array.iter().filter_map(Value::as_str) {
+                let canonical = canonical_project_package(section, key, package);
+                if requested.contains(package) || requested.contains(canonical.as_ref()) {
+                    key_removed += 1;
+                } else {
+                    replacement.push(package);
+                }
             }
+            removed += key_removed;
             *array = replacement;
         }
         security::write_file_atomic(path, document.to_string().as_bytes(), "dual.toml")?;
@@ -513,9 +510,11 @@ fn append_to_array<'a>(
         .filter_map(Value::as_str)
         .map(str::to_owned)
         .collect::<Vec<_>>();
+    let mut seen = existing.iter().cloned().collect::<BTreeSet<_>>();
     for value in values {
-        if !existing.iter().any(|item| item == value) {
-            existing.push(value.to_owned());
+        let value = value.to_owned();
+        if seen.insert(value.clone()) {
+            existing.push(value);
         }
     }
     let mut replacement = Array::new();
@@ -538,11 +537,11 @@ fn project_r_package(package: &str) -> (&str, &str) {
     }
 }
 
-fn canonical_project_package(section: &str, key: &str, package: &str) -> String {
+fn canonical_project_package<'a>(section: &str, key: &str, package: &'a str) -> Cow<'a, str> {
     if section == "python" || key == "packages" || key == "cran" {
-        package.to_owned()
+        Cow::Borrowed(package)
     } else {
-        format!("{key}::{package}")
+        Cow::Owned(format!("{key}::{package}"))
     }
 }
 

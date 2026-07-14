@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -289,13 +290,10 @@ pub fn print_dependencies(config: &Config, source: Option<&str>) {
     if config.python.enabled {
         println!("Python version: {}", config.python.version);
         print_list("Python dependencies", &config.python.packages);
-        let indexes = config
-            .python
-            .index
-            .iter()
-            .map(|index| index.url.clone())
-            .collect::<Vec<_>>();
-        print_list("Python indexes", &indexes);
+        print_str_iter(
+            "Python indexes",
+            config.python.index.iter().map(|index| index.url.as_str()),
+        );
     } else {
         println!("Python: not required");
     }
@@ -316,6 +314,19 @@ fn print_list(label: &str, values: &[String]) {
     } else {
         println!("{label}: {}", values.join(", "));
     }
+}
+
+fn print_str_iter<'a>(label: &str, mut values: impl Iterator<Item = &'a str>) {
+    let Some(first) = values.next() else {
+        println!("{label}: (none)");
+        return;
+    };
+
+    print!("{label}: {first}");
+    for value in values {
+        print!(", {value}");
+    }
+    println!();
 }
 
 fn grouped_r_packages(config: &Config) -> (Vec<String>, Vec<String>, Vec<String>) {
@@ -363,24 +374,22 @@ pub fn export(root: &Path, format: ExportFormat) -> Result<PathBuf> {
                 "renv::init(bare = TRUE)".to_owned(),
             ];
             if !cran.is_empty() {
-                lines.push(format!("renv::install(c({}))", r_values(&cran)));
+                lines.push(format!("renv::install(c({}))", r_values(cran.iter())));
             }
             if !bioc.is_empty() {
                 lines.push(
                     "if (!requireNamespace(\"BiocManager\", quietly = TRUE)) install.packages(\"BiocManager\")"
                         .to_owned(),
                 );
-                lines.push(format!("BiocManager::install(c({}))", r_values(&bioc)));
+                lines.push(format!(
+                    "BiocManager::install(c({}))",
+                    r_values(bioc.iter())
+                ));
             }
             if !github.is_empty() {
                 lines.push(format!(
                     "renv::install(c({}))",
-                    r_values(
-                        &github
-                            .iter()
-                            .map(|package| format!("github::{package}"))
-                            .collect::<Vec<_>>()
-                    )
+                    r_values(github.iter().map(|package| format!("github::{package}")))
                 ));
             }
             lines.push("renv::snapshot()".to_owned());
@@ -410,27 +419,27 @@ pub fn export(root: &Path, format: ExportFormat) -> Result<PathBuf> {
                 )
             };
             let (cran, bioc, github) = grouped_r_packages(&config);
-            let mut r_install = cran
-                .iter()
-                .map(|package| format!("install.packages('{}')", escape_single(package)))
-                .collect::<Vec<_>>();
-            r_install.extend(bioc.iter().map(|package| {
-                format!(
-                    "BiocManager::install('{}', ask=FALSE)",
-                    escape_single(package)
-                )
-            }));
-            r_install.extend(
-                github
-                    .iter()
-                    .map(|package| format!("pak::pkg_install('{}')", escape_single(package))),
-            );
+            let mut r_install = String::new();
+            for package in cran {
+                push_r_install(&mut r_install, "install.packages", &package, "");
+            }
+            for package in bioc {
+                push_r_install(
+                    &mut r_install,
+                    "BiocManager::install",
+                    &package,
+                    ", ask=FALSE",
+                );
+            }
+            for package in github {
+                push_r_install(&mut r_install, "pak::pkg_install", &package, "");
+            }
             let r_layer = if r_install.is_empty() {
                 String::new()
             } else {
                 format!(
                     "RUN Rscript -e \"options(repos=c(CRAN='https://cloud.r-project.org')); install.packages(c('pak','BiocManager')); {}\"\n",
-                    r_install.join("; ")
+                    r_install
                 )
             };
             let quarto = if config.quarto.enabled {
@@ -456,12 +465,34 @@ pub fn export(root: &Path, format: ExportFormat) -> Result<PathBuf> {
     Ok(path)
 }
 
-fn r_values(values: &[String]) -> String {
-    values
-        .iter()
-        .map(|value| format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\"")))
-        .collect::<Vec<_>>()
-        .join(", ")
+fn r_values(values: impl IntoIterator<Item = impl AsRef<str>>) -> String {
+    let mut rendered = String::new();
+    for value in values {
+        if !rendered.is_empty() {
+            rendered.push_str(", ");
+        }
+        rendered.push('"');
+        for character in value.as_ref().chars() {
+            match character {
+                '\\' => rendered.push_str("\\\\"),
+                '"' => rendered.push_str("\\\""),
+                _ => rendered.push(character),
+            }
+        }
+        rendered.push('"');
+    }
+    rendered
+}
+
+fn push_r_install(commands: &mut String, function: &str, package: &str, extra_args: &str) {
+    if !commands.is_empty() {
+        commands.push_str("; ");
+    }
+    let _ = write!(
+        commands,
+        "{function}('{}'{extra_args})",
+        escape_single(package)
+    );
 }
 
 fn escape_single(value: &str) -> String {

@@ -426,6 +426,32 @@ fn doctor_reports_system_status_without_a_project() {
         );
 }
 
+#[cfg(unix)]
+#[test]
+fn doctor_batches_package_checks() {
+    let fixture = backend_fixture();
+    let config_path = fixture.project.path().join("dual.toml");
+    let config = fs::read_to_string(&config_path)
+        .unwrap()
+        .replace("cran = []", r#"cran = ["ggplot2", "dplyr"]"#)
+        .replace("dependencies = []", r#"dependencies = ["pandas", "rich"]"#);
+    fs::write(&config_path, config).unwrap();
+    write_ready_environment(fixture.project.path());
+    write_test_lock(fixture.project.path(), "lock");
+
+    dual_command(&fixture)
+        .args(["--json", "doctor"])
+        .assert()
+        .success();
+
+    let log = fs::read_to_string(&fixture.log).unwrap();
+    assert_eq!(log.matches("importlib.metadata").count(), 1, "{log}");
+    assert_eq!(log.matches("pandas").count(), 1, "{log}");
+    assert_eq!(log.matches("rich").count(), 1, "{log}");
+    assert_eq!(log.matches("ggplot2").count(), 1, "{log}");
+    assert_eq!(log.matches("dplyr").count(), 1, "{log}");
+}
+
 #[test]
 fn force_init_invalidates_stale_environment_and_lock() {
     let directory = initialized_project();

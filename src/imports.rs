@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -113,9 +113,13 @@ fn apply_import(project_root: &Path, data: &ImportData) -> Result<()> {
         set_string(&mut document, "r", "version", version)?;
     }
     append_packages(&mut document, "python", "dependencies", &data.python)?;
+    let mut r_packages = BTreeMap::<&str, Vec<&str>>::new();
     for package in &data.r {
         let (key, value) = r_key_value(package);
-        append_packages(&mut document, "r", key, &[value.to_owned()])?;
+        r_packages.entry(key).or_default().push(value);
+    }
+    for (key, packages) in r_packages {
+        append_package_values(&mut document, "r", key, packages.into_iter())?;
     }
 
     security::write_file_atomic(&config_path, document.to_string().as_bytes(), "dual.toml")?;
@@ -148,6 +152,15 @@ fn append_packages(
     if packages.is_empty() {
         return Ok(());
     }
+    append_package_values(document, section, key, packages.iter().map(String::as_str))
+}
+
+fn append_package_values<'a>(
+    document: &mut toml_edit::DocumentMut,
+    section: &str,
+    key: &str,
+    packages: impl Iterator<Item = &'a str>,
+) -> Result<()> {
     let table = document
         .get_mut(section)
         .and_then(toml_edit::Item::as_table_mut)
@@ -171,9 +184,11 @@ fn append_packages(
         .filter_map(toml_edit::Value::as_str)
         .map(str::to_owned)
         .collect::<Vec<_>>();
+    let mut seen = existing.iter().cloned().collect::<BTreeSet<_>>();
     for package in packages {
-        if !existing.iter().any(|value| value == package) {
-            existing.push(package.clone());
+        let package = package.to_owned();
+        if seen.insert(package.clone()) {
+            existing.push(package);
         }
     }
     let mut replacement = toml_edit::Array::new();
@@ -304,14 +319,15 @@ fn parse_environment_yml(contents: &str) -> Result<ImportData> {
     let value: serde_yaml::Value =
         serde_yaml::from_str(contents).context("environment.yml is not valid YAML")?;
     let mut data = ImportData::default();
-    let dependencies = value
+    let Some(dependencies) = value
         .get("dependencies")
         .and_then(serde_yaml::Value::as_sequence)
-        .cloned()
-        .unwrap_or_default();
+    else {
+        return Ok(data);
+    };
     for dependency in dependencies {
         match dependency {
-            serde_yaml::Value::String(value) => parse_conda_dependency(&mut data, &value),
+            serde_yaml::Value::String(value) => parse_conda_dependency(&mut data, value),
             serde_yaml::Value::Mapping(mapping) => {
                 if let Some(pip) = mapping
                     .get(serde_yaml::Value::String("pip".to_owned()))
