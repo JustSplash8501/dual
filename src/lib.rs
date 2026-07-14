@@ -3,6 +3,7 @@ pub mod cli;
 pub mod config;
 pub mod doctor;
 pub mod errors;
+pub mod imports;
 pub mod metadata;
 pub mod platform;
 pub mod security;

@@ -8,7 +8,7 @@ use crate::config::Config;
 
 pub use engine::{generate_manifest, EnvironmentBackend};
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize)]
 pub struct BackendReport {
     pub available: bool,
     pub environment_present: bool,
@@ -20,7 +20,7 @@ pub struct BackendReport {
     pub bridge: Option<BridgeReport>,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize)]
 pub struct BridgeReport {
     pub reticulate_installed: bool,
     pub uses_project_python: bool,
@@ -36,7 +36,7 @@ pub trait Backend {
     fn verify_manifest(&self, config: &Config) -> Result<()>;
     fn init_or_update(&self, config: &Config, refresh: bool) -> Result<()>;
     fn validate(&self, config: &Config) -> Result<()>;
-    fn run(&self, config: &Config, task: &str) -> Result<()>;
+    fn run(&self, config: &Config, task: &str, args: &[String]) -> Result<()>;
     fn shell(&self, config: &Config) -> Result<()>;
     fn clean(&self) -> Result<Vec<PathBuf>>;
     fn doctor(&self, config: &Config) -> Result<BackendReport>;

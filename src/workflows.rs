@@ -1,9 +1,11 @@
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
+use serde::Serialize;
 
 use crate::backend::{Backend, EnvironmentBackend};
-use crate::config::{Config, EffectiveConfig};
+use crate::config::{Config, EffectiveConfig, TaskConfig};
 use crate::metadata::ScriptKind;
 use crate::security;
 
@@ -23,6 +25,7 @@ pub fn looks_like_script(target: &str) -> bool {
 
 pub fn run_script(
     path: &Path,
+    args: &[String],
     verbose: bool,
     trust_project: bool,
     no_install: bool,
@@ -41,7 +44,7 @@ pub fn run_script(
             &effective.config,
             Some(effective.source.to_string().as_str()),
         );
-        println!("Would run: {command}");
+        println!("Would run: {}", command_with_args(command.command(), args));
         return Ok(());
     }
 
@@ -72,11 +75,19 @@ pub fn run_script(
             )
         })
         .transpose()?;
-    backend.run(&effective.config, SCRIPT_TASK)?;
+    backend.run(&effective.config, SCRIPT_TASK, args)?;
     if let Some(snapshot) = document_snapshot {
         security::verify_project_snapshot(&effective.root, &snapshot)
     } else {
         security::verify_project_unchanged(&effective.root, &trust)
+    }
+}
+
+fn command_with_args(command: &str, args: &[String]) -> String {
+    if args.is_empty() {
+        command.to_owned()
+    } else {
+        format!("{command} {}", args.join(" "))
     }
 }
 
@@ -153,7 +164,7 @@ fn prepare_script_config(effective: &mut EffectiveConfig) -> Result<()> {
     effective
         .config
         .tasks
-        .insert(SCRIPT_TASK.to_owned(), command);
+        .insert(SCRIPT_TASK.to_owned(), TaskConfig::simple(command));
     Ok(())
 }
 
@@ -188,16 +199,88 @@ fn document_outputs(root: &Path, script: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-pub fn show_script_dependencies(path: &Path) -> Result<()> {
+pub fn show_script_dependencies(path: &Path, json: bool) -> Result<()> {
     let effective = Config::for_script(path)?;
-    print_dependencies(&effective.config, Some(&effective.source.to_string()));
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&DependencyReport::from_config(
+                &effective.config,
+                Some(effective.source.to_string())
+            ))?
+        );
+    } else {
+        print_dependencies(&effective.config, Some(&effective.source.to_string()));
+    }
     Ok(())
 }
 
-pub fn show_project_dependencies(root: &Path) -> Result<()> {
+pub fn show_project_dependencies(root: &Path, json: bool) -> Result<()> {
     let config = Config::load(root)?;
-    print_dependencies(&config, Some("project dual.toml"));
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&DependencyReport::from_config(
+                &config,
+                Some("project dual.toml".to_owned())
+            ))?
+        );
+    } else {
+        print_dependencies(&config, Some("project dual.toml"));
+    }
     Ok(())
+}
+
+#[derive(Serialize)]
+struct DependencyReport {
+    source: Option<String>,
+    python: LanguageDependencies,
+    r: RDependencies,
+}
+
+#[derive(Serialize)]
+struct LanguageDependencies {
+    enabled: bool,
+    version: String,
+    dependencies: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    indexes: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct RDependencies {
+    enabled: bool,
+    version: String,
+    cran: Vec<String>,
+    bioc: Vec<String>,
+    github: Vec<String>,
+}
+
+impl DependencyReport {
+    fn from_config(config: &Config, source: Option<String>) -> Self {
+        let (cran, bioc, github) = grouped_r_packages(config);
+        Self {
+            source,
+            python: LanguageDependencies {
+                enabled: config.python.enabled,
+                version: config.python.version.clone(),
+                dependencies: config.python.packages.clone(),
+                indexes: config
+                    .python
+                    .index
+                    .iter()
+                    .map(|index| index.url.clone())
+                    .collect(),
+            },
+            r: RDependencies {
+                enabled: config.r.enabled,
+                version: config.r.version.clone(),
+                cran,
+                bioc,
+                github,
+            },
+        }
+    }
 }
 
 pub fn print_dependencies(config: &Config, source: Option<&str>) {
@@ -207,13 +290,10 @@ pub fn print_dependencies(config: &Config, source: Option<&str>) {
     if config.python.enabled {
         println!("Python version: {}", config.python.version);
         print_list("Python dependencies", &config.python.packages);
-        let indexes = config
-            .python
-            .index
-            .iter()
-            .map(|index| index.url.clone())
-            .collect::<Vec<_>>();
-        print_list("Python indexes", &indexes);
+        print_str_iter(
+            "Python indexes",
+            config.python.index.iter().map(|index| index.url.as_str()),
+        );
     } else {
         println!("Python: not required");
     }
@@ -234,6 +314,19 @@ fn print_list(label: &str, values: &[String]) {
     } else {
         println!("{label}: {}", values.join(", "));
     }
+}
+
+fn print_str_iter<'a>(label: &str, mut values: impl Iterator<Item = &'a str>) {
+    let Some(first) = values.next() else {
+        println!("{label}: (none)");
+        return;
+    };
+
+    print!("{label}: {first}");
+    for value in values {
+        print!(", {value}");
+    }
+    println!();
 }
 
 fn grouped_r_packages(config: &Config) -> (Vec<String>, Vec<String>, Vec<String>) {
@@ -281,69 +374,89 @@ pub fn export(root: &Path, format: ExportFormat) -> Result<PathBuf> {
                 "renv::init(bare = TRUE)".to_owned(),
             ];
             if !cran.is_empty() {
-                lines.push(format!("renv::install(c({}))", r_values(&cran)));
+                lines.push(format!("renv::install(c({}))", r_values(cran.iter())));
             }
             if !bioc.is_empty() {
                 lines.push(
                     "if (!requireNamespace(\"BiocManager\", quietly = TRUE)) install.packages(\"BiocManager\")"
                         .to_owned(),
                 );
-                lines.push(format!("BiocManager::install(c({}))", r_values(&bioc)));
+                lines.push(format!(
+                    "BiocManager::install(c({}))",
+                    r_values(bioc.iter())
+                ));
             }
             if !github.is_empty() {
                 lines.push(format!(
                     "renv::install(c({}))",
-                    r_values(
-                        &github
-                            .iter()
-                            .map(|package| format!("github::{package}"))
-                            .collect::<Vec<_>>()
-                    )
+                    r_values(github.iter().map(|package| format!("github::{package}")))
                 ));
             }
             lines.push("renv::snapshot()".to_owned());
             (root.join("renv-dependencies.R"), lines.join("\n") + "\n")
         }
         ExportFormat::Dockerfile => {
-            let requirements = if config.python.packages.is_empty() {
+            let python_version = docker_version(&config.python.version);
+            let r_version = docker_version(&config.r.version);
+            let base = if config.r.enabled {
+                format!("rocker/r-ver:{r_version}")
+            } else if config.python.enabled {
+                format!("python:{python_version}-slim")
+            } else {
+                "debian:bookworm-slim".to_owned()
+            };
+            let system_packages = if config.r.enabled && config.python.enabled {
+                "RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-venv git build-essential ca-certificates && rm -rf /var/lib/apt/lists/*\nRUN python3 -m venv /opt/dual-python\nENV PATH=\"/opt/dual-python/bin:${PATH}\"\n"
+            } else {
+                "RUN apt-get update && apt-get install -y --no-install-recommends git build-essential ca-certificates && rm -rf /var/lib/apt/lists/*\n"
+            };
+            let python_install = if config.python.packages.is_empty() {
                 String::new()
             } else {
-                "COPY requirements.txt /tmp/requirements.txt\nRUN python -m pip install --no-cache-dir -r /tmp/requirements.txt\n".to_owned()
+                format!(
+                    "RUN <<'EOF'\ncat > /tmp/requirements.txt <<'REQ'\n{}REQ\npython -m pip install --no-cache-dir -r /tmp/requirements.txt\nEOF\n",
+                    config.python.packages.join("\n") + "\n"
+                )
             };
             let (cran, bioc, github) = grouped_r_packages(&config);
-            let mut r_install = cran
-                .iter()
-                .map(|package| format!("install.packages('{}')", escape_single(package)))
-                .collect::<Vec<_>>();
-            r_install.extend(bioc.iter().map(|package| {
-                format!(
-                    "BiocManager::install('{}', ask=FALSE)",
-                    escape_single(package)
-                )
-            }));
-            r_install.extend(
-                github
-                    .iter()
-                    .map(|package| format!("pak::pkg_install('{}')", escape_single(package))),
-            );
+            let mut r_install = String::new();
+            for package in cran {
+                push_r_install(&mut r_install, "install.packages", &package, "");
+            }
+            for package in bioc {
+                push_r_install(
+                    &mut r_install,
+                    "BiocManager::install",
+                    &package,
+                    ", ask=FALSE",
+                );
+            }
+            for package in github {
+                push_r_install(&mut r_install, "pak::pkg_install", &package, "");
+            }
             let r_layer = if r_install.is_empty() {
                 String::new()
             } else {
                 format!(
-                    "RUN Rscript -e \"install.packages(c('pak','BiocManager')); {}\"\n",
-                    r_install.join("; ")
+                    "RUN Rscript -e \"options(repos=c(CRAN='https://cloud.r-project.org')); install.packages(c('pak','BiocManager')); {}\"\n",
+                    r_install
                 )
             };
             let quarto = if config.quarto.enabled {
-                "# Quarto documents require adding the appropriate Quarto release for this image.\n"
+                "# Quarto is enabled in dual.toml. Add a pinned Quarto release here if your image must render documents.\n"
             } else {
                 ""
             };
+            let dockerignore = ".dual/\ntarget/\n.git/\nresults/\n";
+            security::write_file_atomic(
+                &root.join(".dockerignore"),
+                dockerignore.as_bytes(),
+                ".dockerignore",
+            )?;
             (
                 root.join("Dockerfile"),
                 format!(
-                    "# Generated by dual. Review versions and system libraries before production use.\nFROM rocker/r-ver:{}\nRUN apt-get update && apt-get install -y --no-install-recommends python3 python3-pip git build-essential && rm -rf /var/lib/apt/lists/*\nWORKDIR /project\n{requirements}{r_layer}{quarto}COPY . /project\nCMD [\"bash\"]\n",
-                    config.r.version.trim_start_matches(['>', '=', '<', '~', '^'])
+                    "# Generated by dual. Review versions and system libraries before production use.\nFROM {base}\nLABEL org.opencontainers.image.source=\"dual\"\nSHELL [\"/bin/bash\", \"-euo\", \"pipefail\", \"-c\"]\n{system_packages}WORKDIR /project\n{python_install}{r_layer}{quarto}COPY . /project\nCMD [\"bash\"]\n",
                 ),
             )
         }
@@ -352,14 +465,46 @@ pub fn export(root: &Path, format: ExportFormat) -> Result<PathBuf> {
     Ok(path)
 }
 
-fn r_values(values: &[String]) -> String {
-    values
-        .iter()
-        .map(|value| format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\"")))
-        .collect::<Vec<_>>()
-        .join(", ")
+fn r_values(values: impl IntoIterator<Item = impl AsRef<str>>) -> String {
+    let mut rendered = String::new();
+    for value in values {
+        if !rendered.is_empty() {
+            rendered.push_str(", ");
+        }
+        rendered.push('"');
+        for character in value.as_ref().chars() {
+            match character {
+                '\\' => rendered.push_str("\\\\"),
+                '"' => rendered.push_str("\\\""),
+                _ => rendered.push(character),
+            }
+        }
+        rendered.push('"');
+    }
+    rendered
+}
+
+fn push_r_install(commands: &mut String, function: &str, package: &str, extra_args: &str) {
+    if !commands.is_empty() {
+        commands.push_str("; ");
+    }
+    let _ = write!(
+        commands,
+        "{function}('{}'{extra_args})",
+        escape_single(package)
+    );
 }
 
 fn escape_single(value: &str) -> String {
     value.replace('\\', "\\\\").replace('\'', "\\'")
+}
+
+fn docker_version(value: &str) -> String {
+    value
+        .trim_start_matches(['>', '=', '<', '~', '^'])
+        .split(',')
+        .next()
+        .unwrap_or(value)
+        .trim()
+        .to_owned()
 }

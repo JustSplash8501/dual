@@ -1,4 +1,5 @@
-use std::collections::BTreeMap;
+use std::borrow::Cow;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 #[cfg(test)]
@@ -44,7 +45,7 @@ pub struct Config {
     #[serde(default)]
     pub quarto: QuartoConfig,
     #[serde(default)]
-    pub tasks: BTreeMap<String, String>,
+    pub tasks: BTreeMap<String, TaskConfig>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -83,6 +84,41 @@ pub struct RConfig {
 pub struct QuartoConfig {
     #[serde(default)]
     pub enabled: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum TaskConfig {
+    Command(String),
+    Detailed(TaskDetails),
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TaskDetails {
+    pub cmd: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deps: Vec<String>,
+}
+
+impl TaskConfig {
+    pub fn simple(command: impl Into<String>) -> Self {
+        Self::Command(command.into())
+    }
+
+    pub fn command(&self) -> &str {
+        match self {
+            Self::Command(command) => command,
+            Self::Detailed(details) => &details.cmd,
+        }
+    }
+
+    pub fn deps(&self) -> &[String] {
+        match self {
+            Self::Command(_) => &[],
+            Self::Detailed(details) => &details.deps,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -336,8 +372,8 @@ impl Config {
         for index in &self.python.index {
             validate_index_url(&index.url)?;
         }
-        for (name, command) in &self.tasks {
-            if name.trim().is_empty() || command.trim().is_empty() {
+        for (name, task) in &self.tasks {
+            if name.trim().is_empty() || task.command().trim().is_empty() {
                 return Err(DualError::InvalidConfig(
                     "task names and commands cannot be empty".into(),
                 )
@@ -349,7 +385,16 @@ impl Config {
                 );
             }
             reject_control_characters("task name", name)?;
-            reject_control_characters("task command", command)?;
+            reject_control_characters("task command", task.command())?;
+            for dependency in task.deps() {
+                if dependency.trim().is_empty() {
+                    return Err(DualError::InvalidConfig(
+                        "task dependencies cannot be empty".into(),
+                    )
+                    .into());
+                }
+                reject_control_characters("task dependency", dependency)?;
+            }
         }
         Ok(())
     }
@@ -389,9 +434,13 @@ impl Config {
             };
             append_to_array(table, key, packages.iter().map(String::as_str))?;
         } else {
+            let mut grouped = BTreeMap::<&str, Vec<&str>>::new();
             for package in packages {
                 let (key, value) = project_r_package(package);
-                append_to_array(table, key, std::iter::once(value))?;
+                grouped.entry(key).or_default().push(value);
+            }
+            for (key, values) in grouped {
+                append_to_array(table, key, values.into_iter())?;
             }
         }
         security::write_file_atomic(path, document.to_string().as_bytes(), "dual.toml")?;
@@ -414,36 +463,28 @@ impl Config {
             .get_mut(section)
             .and_then(Item::as_table_mut)
             .ok_or_else(|| DualError::InvalidConfig(format!("[{section}] is required")))?;
-        let keys = if section == "python" {
-            vec!["dependencies", "packages"]
+        let keys: &[&str] = if section == "python" {
+            &["dependencies", "packages"]
         } else {
-            vec!["cran", "bioc", "github", "packages"]
+            &["cran", "bioc", "github", "packages"]
         };
+        let requested = packages.iter().map(String::as_str).collect::<BTreeSet<_>>();
         let mut removed = 0;
         for key in keys {
             let Some(array) = table.get_mut(key).and_then(Item::as_array_mut) else {
                 continue;
             };
-            let existing = array
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_owned)
-                .collect::<Vec<_>>();
-            let retained = existing
-                .iter()
-                .filter(|package| {
-                    let canonical = canonical_project_package(section, key, package);
-                    !packages
-                        .iter()
-                        .any(|requested| requested == *package || requested == &canonical)
-                })
-                .cloned()
-                .collect::<Vec<_>>();
-            removed += existing.len() - retained.len();
             let mut replacement = Array::new();
-            for package in retained {
-                replacement.push(package);
+            let mut key_removed = 0;
+            for package in array.iter().filter_map(Value::as_str) {
+                let canonical = canonical_project_package(section, key, package);
+                if requested.contains(package) || requested.contains(canonical.as_ref()) {
+                    key_removed += 1;
+                } else {
+                    replacement.push(package);
+                }
             }
+            removed += key_removed;
             *array = replacement;
         }
         security::write_file_atomic(path, document.to_string().as_bytes(), "dual.toml")?;
@@ -469,9 +510,11 @@ fn append_to_array<'a>(
         .filter_map(Value::as_str)
         .map(str::to_owned)
         .collect::<Vec<_>>();
+    let mut seen = existing.iter().cloned().collect::<BTreeSet<_>>();
     for value in values {
-        if !existing.iter().any(|item| item == value) {
-            existing.push(value.to_owned());
+        let value = value.to_owned();
+        if seen.insert(value.clone()) {
+            existing.push(value);
         }
     }
     let mut replacement = Array::new();
@@ -494,11 +537,11 @@ fn project_r_package(package: &str) -> (&str, &str) {
     }
 }
 
-fn canonical_project_package(section: &str, key: &str, package: &str) -> String {
+fn canonical_project_package<'a>(section: &str, key: &str, package: &'a str) -> Cow<'a, str> {
     if section == "python" || key == "packages" || key == "cran" {
-        package.to_owned()
+        Cow::Borrowed(package)
     } else {
-        format!("{key}::{package}")
+        Cow::Owned(format!("{key}::{package}"))
     }
 }
 
@@ -695,6 +738,10 @@ fn valid_distribution_name(value: &str) -> bool {
         })
 }
 
+pub fn valid_distribution_name_for_import(value: &str) -> bool {
+    valid_distribution_name(value)
+}
+
 pub fn valid_version_specifier(value: &str) -> bool {
     value == "*"
         || (!value.chars().any(char::is_whitespace)
@@ -829,7 +876,7 @@ enabled = true
         let mut config: Config = toml::from_str(DEFAULT_CONFIG).unwrap();
         config
             .tasks
-            .insert("unsafe".into(), "echo\u{7}danger".into());
+            .insert("unsafe".into(), TaskConfig::simple("echo\u{7}danger"));
         assert!(config.validate().is_err());
     }
 

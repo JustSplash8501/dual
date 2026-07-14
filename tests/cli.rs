@@ -267,6 +267,44 @@ fn deps_and_dry_run_merge_project_and_inline_metadata() {
 }
 
 #[test]
+fn deps_task_list_and_doctor_support_json() {
+    let directory = initialized_project();
+    let config_path = directory.path().join("dual.toml");
+    fs::write(
+        &config_path,
+        fs::read_to_string(&config_path).unwrap().replace(
+            "[tasks]\n",
+            "[tasks]\nprepare = \"python scripts/prepare.py\"\nanalysis = { cmd = \"python scripts/analysis.py\", deps = [\"prepare\"] }\n",
+        ),
+    )
+    .unwrap();
+
+    Command::cargo_bin("dual")
+        .unwrap()
+        .current_dir(directory.path())
+        .args(["--json", "deps"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"python\""));
+
+    Command::cargo_bin("dual")
+        .unwrap()
+        .current_dir(directory.path())
+        .args(["--json", "task", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"deps\"").and(predicate::str::contains("prepare")));
+
+    Command::cargo_bin("dual")
+        .unwrap()
+        .current_dir(directory.path())
+        .args(["--json", "doctor"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"config_present\": true"));
+}
+
+#[test]
 fn export_commands_write_conservative_files() {
     let directory = initialized_project();
     Command::cargo_bin("dual")
@@ -290,6 +328,100 @@ fn export_commands_write_conservative_files() {
             .unwrap()
             .contains(expected));
     }
+    let dockerfile = fs::read_to_string(directory.path().join("Dockerfile")).unwrap();
+    assert!(dockerfile.contains("cat > /tmp/requirements.txt"));
+    assert!(dockerfile.contains("python3 -m venv /opt/dual-python"));
+    assert!(dockerfile.contains("ENV PATH=\"/opt/dual-python/bin:${PATH}\""));
+    assert!(dockerfile.contains("python -m pip install --no-cache-dir"));
+    assert!(fs::read_to_string(directory.path().join(".dockerignore"))
+        .unwrap()
+        .contains(".dual/"));
+}
+
+#[test]
+fn import_reads_supported_dependency_files() {
+    let directory = initialized_project();
+    fs::write(
+        directory.path().join("requirements.txt"),
+        "pandas==2.2.0\n# comment\n--extra-index-url https://example.com/simple\nrich\n",
+    )
+    .unwrap();
+    Command::cargo_bin("dual")
+        .unwrap()
+        .current_dir(directory.path())
+        .args(["--json", "import", "requirements.txt"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("pandas==2.2.0"));
+
+    fs::write(
+        directory.path().join("environment.yml"),
+        "name: demo\ndependencies:\n  - python=3.12\n  - r-base=4.4\n  - r-dplyr=1.1.4\n  - pip:\n    - scikit-learn==1.5.0\n",
+    )
+    .unwrap();
+    Command::cargo_bin("dual")
+        .unwrap()
+        .current_dir(directory.path())
+        .args(["import", "environment.yml"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Python version: 3.12"));
+
+    fs::write(
+        directory.path().join("uv.lock"),
+        r#"requires-python = ">=3.12"
+
+[[package]]
+name = "numpy"
+version = "2.0.0"
+"#,
+    )
+    .unwrap();
+    Command::cargo_bin("dual")
+        .unwrap()
+        .current_dir(directory.path())
+        .args(["import", "uv.lock"])
+        .assert()
+        .success();
+
+    fs::write(
+        directory.path().join("renv.lock"),
+        r#"{
+  "R": { "Version": "4.4.0" },
+  "Packages": {
+    "targets": { "Package": "targets", "Version": "1.11.4", "Source": "CRAN" },
+    "DESeq2": { "Package": "DESeq2", "Version": "1.42.0", "Source": "Bioconductor" }
+  }
+}"#,
+    )
+    .unwrap();
+    Command::cargo_bin("dual")
+        .unwrap()
+        .current_dir(directory.path())
+        .args(["import", "renv.lock"])
+        .assert()
+        .success();
+
+    fs::write(
+        directory.path().join("env.lock"),
+        "packages:\n  - name: python\n    version: '3.12'\n  - name: r-ggplot2\n    version: 3.5.1\n",
+    )
+    .unwrap();
+    Command::cargo_bin("dual")
+        .unwrap()
+        .current_dir(directory.path())
+        .args(["import", "env.lock"])
+        .assert()
+        .success();
+
+    let config = fs::read_to_string(directory.path().join("dual.toml")).unwrap();
+    assert!(config.contains("pandas==2.2.0"));
+    assert!(config.contains("scikit-learn==1.5.0"));
+    assert!(config.contains("numpy==2.0.0"));
+    assert!(config.contains("dplyr@1.1.4"));
+    assert!(config.contains("targets@1.11.4"));
+    assert!(config.contains("DESeq2@1.42.0"));
+    assert!(config.contains("ggplot2@3.5.1"));
 }
 
 #[test]
@@ -306,6 +438,32 @@ fn doctor_reports_system_status_without_a_project() {
                 .and(predicate::str::contains("operating system"))
                 .and(predicate::str::contains("no dual.toml found")),
         );
+}
+
+#[cfg(unix)]
+#[test]
+fn doctor_batches_package_checks() {
+    let fixture = backend_fixture();
+    let config_path = fixture.project.path().join("dual.toml");
+    let config = fs::read_to_string(&config_path)
+        .unwrap()
+        .replace("cran = []", r#"cran = ["ggplot2", "dplyr"]"#)
+        .replace("dependencies = []", r#"dependencies = ["pandas", "rich"]"#);
+    fs::write(&config_path, config).unwrap();
+    write_ready_environment(fixture.project.path());
+    write_test_lock(fixture.project.path(), "lock");
+
+    dual_command(&fixture)
+        .args(["--json", "doctor"])
+        .assert()
+        .success();
+
+    let log = fs::read_to_string(&fixture.log).unwrap();
+    assert_eq!(log.matches("importlib.metadata").count(), 1, "{log}");
+    assert_eq!(log.matches("pandas").count(), 1, "{log}");
+    assert_eq!(log.matches("rich").count(), 1, "{log}");
+    assert_eq!(log.matches("ggplot2").count(), 1, "{log}");
+    assert_eq!(log.matches("dplyr").count(), 1, "{log}");
 }
 
 #[test]
@@ -969,6 +1127,70 @@ fn run_prints_task_output() {
 
 #[cfg(unix)]
 #[test]
+fn run_executes_task_dependencies_first() {
+    let fixture = backend_fixture();
+    fs::write(
+        fixture.project.path().join("dual.toml"),
+        fs::read_to_string(fixture.project.path().join("dual.toml"))
+            .unwrap()
+            .replace(
+                "[tasks]\n",
+                "[tasks]\nprepare = \"python prepare.py\"\nanalysis = { cmd = \"python analysis.py\", deps = [\"prepare\"] }\n",
+            ),
+    )
+    .unwrap();
+    write_ready_environment(fixture.project.path());
+    write_test_lock(fixture.project.path(), "lock");
+
+    dual_command(&fixture)
+        .args(["run", "analysis"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("Running task `prepare`")
+                .and(predicate::str::contains("Running task `analysis`")),
+        );
+
+    let log = fs::read_to_string(&fixture.log).unwrap();
+    let prepare = log.find(" prepare\n").unwrap();
+    let analysis = log.find(" analysis\n").unwrap();
+    assert!(prepare < analysis, "{log}");
+}
+
+#[cfg(unix)]
+#[test]
+fn run_forwards_trailing_args_to_the_requested_task() {
+    let fixture = backend_fixture();
+    fs::write(
+        fixture.project.path().join("dual.toml"),
+        fs::read_to_string(fixture.project.path().join("dual.toml"))
+            .unwrap()
+            .replace(
+                "[tasks]\n",
+                "[tasks]\nprepare = \"python prepare.py\"\nanalysis = { cmd = \"python analysis.py\", deps = [\"prepare\"] }\n",
+            ),
+    )
+    .unwrap();
+    write_ready_environment(fixture.project.path());
+    write_test_lock(fixture.project.path(), "lock");
+
+    dual_command(&fixture)
+        .args([
+            "run", "analysis", "--", "--input", "data.csv", "--limit", "10",
+        ])
+        .assert()
+        .success();
+
+    let log = fs::read_to_string(&fixture.log).unwrap();
+    assert!(log.contains(" prepare\n"), "{log}");
+    assert!(
+        log.contains(" analysis -- --input data.csv --limit 10\n"),
+        "{log}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn run_script_prepares_environment_executes_and_records_lock_metadata() {
     let fixture = backend_fixture();
     fs::write(
@@ -1001,6 +1223,31 @@ fn run_script_prepares_environment_executes_and_records_lock_metadata() {
     assert_eq!(lock["metadata"]["python"]["requested"], ">=3.12");
     assert_eq!(lock["metadata"]["python"]["dependencies"][0], "rich");
     assert!(lock["metadata"]["timestamp"].is_number());
+}
+
+#[test]
+fn run_script_dry_run_shows_trailing_args() {
+    let directory = initialized_project();
+    fs::write(directory.path().join("analysis.py"), "print('ok')\n").unwrap();
+
+    Command::cargo_bin("dual")
+        .unwrap()
+        .current_dir(directory.path())
+        .args([
+            "run",
+            "analysis.py",
+            "--dry-run",
+            "--",
+            "--input",
+            "data.csv",
+            "--limit",
+            "10",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Would run: python \"analysis.py\" --input data.csv --limit 10",
+        ));
 }
 
 #[cfg(unix)]

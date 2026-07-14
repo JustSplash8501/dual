@@ -1,9 +1,10 @@
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{Command, ExitStatus, Output, Stdio};
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -27,16 +28,57 @@ const ENGINE_VERSION: &str = "0.70.2";
 pub struct EnvironmentBackend {
     root: PathBuf,
     state_dir: PathBuf,
+    workspace_dir: PathBuf,
+    manifest_path: PathBuf,
+    backend_lock_path: PathBuf,
+    backend_metadata_path: PathBuf,
     public_lock_path: PathBuf,
+    staged_pak_lock_path: PathBuf,
+    ready_path: PathBuf,
+    config_path: PathBuf,
     verbose: bool,
+}
+
+struct BackendPaths {
+    workspace_dir: PathBuf,
+    manifest_path: PathBuf,
+    backend_lock_path: PathBuf,
+    backend_metadata_path: PathBuf,
+    staged_pak_lock_path: PathBuf,
+    ready_path: PathBuf,
+    config_path: PathBuf,
+}
+
+impl BackendPaths {
+    fn new(state_dir: &Path) -> Self {
+        let workspace_dir = state_dir.join("workspace");
+        Self {
+            manifest_path: workspace_dir.join("pyproject.toml"),
+            backend_lock_path: workspace_dir.join(BACKEND_LOCK_NAME),
+            backend_metadata_path: workspace_dir.join(".pixi"),
+            staged_pak_lock_path: workspace_dir.join(PAK_LOCK_NAME),
+            ready_path: state_dir.join("ready"),
+            config_path: state_dir.join("engine.toml"),
+            workspace_dir,
+        }
+    }
 }
 
 impl EnvironmentBackend {
     pub fn new(root: &Path, verbose: bool) -> Self {
+        let state_dir = root.join(".dual");
+        let paths = BackendPaths::new(&state_dir);
         Self {
             root: root.to_owned(),
-            state_dir: root.join(".dual"),
+            state_dir,
+            workspace_dir: paths.workspace_dir,
+            manifest_path: paths.manifest_path,
+            backend_lock_path: paths.backend_lock_path,
+            backend_metadata_path: paths.backend_metadata_path,
             public_lock_path: root.join("dual.lock"),
+            staged_pak_lock_path: paths.staged_pak_lock_path,
+            ready_path: paths.ready_path,
+            config_path: paths.config_path,
             verbose,
         }
     }
@@ -52,52 +94,60 @@ impl EnvironmentBackend {
         } else {
             root.join("dual.lock")
         };
+        let paths = BackendPaths::new(&state_dir);
         Self {
             root: root.to_owned(),
             state_dir,
+            workspace_dir: paths.workspace_dir,
+            manifest_path: paths.manifest_path,
+            backend_lock_path: paths.backend_lock_path,
+            backend_metadata_path: paths.backend_metadata_path,
             public_lock_path,
+            staged_pak_lock_path: paths.staged_pak_lock_path,
+            ready_path: paths.ready_path,
+            config_path: paths.config_path,
             verbose,
         }
     }
 
-    fn state_dir(&self) -> PathBuf {
-        self.state_dir.clone()
+    fn state_dir(&self) -> &Path {
+        &self.state_dir
     }
 
-    fn workspace_dir(&self) -> PathBuf {
-        self.state_dir().join("workspace")
+    fn workspace_dir(&self) -> &Path {
+        &self.workspace_dir
     }
 
-    fn manifest_path(&self) -> PathBuf {
-        self.workspace_dir().join("pyproject.toml")
+    fn manifest_path(&self) -> &Path {
+        &self.manifest_path
     }
 
-    fn backend_lock_path(&self) -> PathBuf {
-        self.workspace_dir().join(BACKEND_LOCK_NAME)
+    fn backend_lock_path(&self) -> &Path {
+        &self.backend_lock_path
     }
 
-    fn backend_metadata_path(&self) -> PathBuf {
-        self.workspace_dir().join(".pixi")
+    fn backend_metadata_path(&self) -> &Path {
+        &self.backend_metadata_path
     }
 
-    fn public_lock_path(&self) -> PathBuf {
-        self.public_lock_path.clone()
+    fn public_lock_path(&self) -> &Path {
+        &self.public_lock_path
     }
 
-    fn staged_pak_lock_path(&self) -> PathBuf {
-        self.workspace_dir().join(PAK_LOCK_NAME)
+    fn staged_pak_lock_path(&self) -> &Path {
+        &self.staged_pak_lock_path
     }
 
-    fn ready_path(&self) -> PathBuf {
-        self.state_dir().join("ready")
+    fn ready_path(&self) -> &Path {
+        &self.ready_path
     }
 
     fn bridge_dir(&self) -> PathBuf {
         self.state_dir().join("bridge")
     }
 
-    fn config_path(&self) -> PathBuf {
-        self.state_dir().join("engine.toml")
+    fn config_path(&self) -> &Path {
+        &self.config_path
     }
 
     fn r_profile_path(&self) -> PathBuf {
@@ -171,17 +221,21 @@ impl EnvironmentBackend {
             self.backend_metadata_path(),
             self.staged_pak_lock_path(),
             self.ready_path(),
-            self.bridge_dir(),
             self.config_path(),
+            self.public_lock_path(),
+        ] {
+            security::ensure_managed_path(&self.root, path)?;
+        }
+        for path in [
+            self.bridge_dir(),
             self.r_profile_path(),
             self.shell_state_dir(),
             self.zsh_state_dir(),
             self.zshrc_path(),
-            self.public_lock_path(),
         ] {
             security::ensure_managed_path(&self.root, &path)?;
         }
-        security::reject_symlink_if_present(&self.public_lock_path(), "dual.lock")?;
+        security::reject_symlink_if_present(self.public_lock_path(), "dual.lock")?;
         Ok(())
     }
 
@@ -298,7 +352,7 @@ impl EnvironmentBackend {
             environments.to_string_lossy()
         );
         security::write_file_atomic(
-            &self.config_path(),
+            self.config_path(),
             config.as_bytes(),
             "internal environment configuration",
         )
@@ -342,9 +396,9 @@ impl EnvironmentBackend {
         self.ensure_state_paths_safe()?;
         self.clear_backend_lock()?;
         if self.public_lock_path().is_file() {
-            let lock = read_dual_lock(&self.public_lock_path())?;
+            let lock = read_dual_lock(self.public_lock_path())?;
             security::write_file_atomic(
-                &self.backend_lock_path(),
+                self.backend_lock_path(),
                 lock.environment.as_bytes(),
                 "staged environment lock",
             )
@@ -356,7 +410,7 @@ impl EnvironmentBackend {
     fn finish_lock(&self) -> Result<()> {
         self.clear_backend_lock()?;
         self.clear_backend_metadata()?;
-        clear_engine_markers(&self.state_dir())?;
+        clear_engine_markers(self.state_dir())?;
         Ok(())
     }
 
@@ -370,7 +424,7 @@ impl EnvironmentBackend {
 
     fn clear_backend_metadata(&self) -> Result<()> {
         let path = self.backend_metadata_path();
-        security::ensure_managed_path(&self.root, &path)?;
+        security::ensure_managed_path(&self.root, path)?;
         if path.is_dir() {
             fs::remove_dir_all(path).context("could not remove temporary engine metadata")?;
         }
@@ -396,9 +450,8 @@ impl EnvironmentBackend {
         Ok(())
     }
 
-    fn execute_task(&self, args: &[&str], task: &str) -> Result<()> {
-        let status = self
-            .configured_command(args)?
+    fn execute_task_command(&self, mut command: Command, task: &str) -> Result<()> {
+        let status = command
             .stdin(Stdio::inherit())
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
@@ -441,38 +494,118 @@ impl EnvironmentBackend {
         succeeded
     }
 
+    fn run_check_output(&self, command: &[&str]) -> Option<Output> {
+        let manifest = self.manifest_arg();
+        let mut args = vec![
+            "run",
+            "--manifest-path",
+            &manifest,
+            "--locked",
+            "--executable",
+        ];
+        args.extend(command);
+        if self.stage_lock().is_err() {
+            return None;
+        }
+        let output = self.capture_output(&args, Duration::from_secs(2 * 60)).ok();
+        let _ = self.finish_lock();
+        output
+    }
+
+    fn capture_output(&self, args: &[&str], timeout: Duration) -> Result<Output> {
+        if self.verbose {
+            eprintln!("{}", verbose_status("Checking project environment"));
+        }
+        let mut command = self.internal_command(args)?;
+        command.stdout(Stdio::piped()).stderr(Stdio::null());
+        run_with_output_timeout(&mut command, timeout)
+            .map_err(|error| DualError::BackendStart(error.to_string()).into())
+    }
+
     fn missing_r_packages(&self, packages: &[String]) -> Vec<String> {
-        packages
+        let mut missing = Vec::new();
+        let mut candidates = Vec::new();
+        for package in packages {
+            if let Some(name) = r_package_name(package) {
+                candidates.push((package, name.into_owned()));
+            } else {
+                missing.push(package.clone());
+            }
+        }
+        if candidates.is_empty() {
+            return missing;
+        }
+
+        let names = candidates
             .iter()
-            .filter(|package| {
-                let Some(name) = r_package_name(package) else {
-                    return true;
-                };
-                let expression = format!(
-                    "quit(status=ifelse(requireNamespace('{}', quietly=TRUE), 0, 1))",
-                    escape_r_string(&name)
-                );
-                !self.run_check(&["Rscript", "--vanilla", "-e", &expression])
-            })
-            .cloned()
-            .collect()
+            .map(|(_, name)| r_string_literal(name))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let expression = format!(
+            "packages <- c({names}); missing <- packages[!vapply(packages, requireNamespace, logical(1), quietly=TRUE)]; writeLines(missing)"
+        );
+        let Some(output) = self.run_check_output(&["Rscript", "--vanilla", "-e", &expression])
+        else {
+            missing.extend(candidates.into_iter().map(|(package, _)| package.clone()));
+            return missing;
+        };
+        if !output.status.success() {
+            missing.extend(candidates.into_iter().map(|(package, _)| package.clone()));
+            return missing;
+        }
+        let output = String::from_utf8_lossy(&output.stdout);
+        let missing_names = output.lines().collect::<std::collections::BTreeSet<_>>();
+        missing.extend(
+            candidates
+                .into_iter()
+                .filter(|(_, name)| missing_names.contains(name.as_str()))
+                .map(|(package, _)| package.clone()),
+        );
+        missing
     }
 
     fn missing_python_packages(&self, packages: &[String]) -> Vec<String> {
-        packages
+        let mut missing = Vec::new();
+        let mut candidates = Vec::new();
+        for package in packages {
+            if let Ok(requirement) = parse_python_requirement(package) {
+                candidates.push((package, requirement.name));
+            } else {
+                missing.push(package.clone());
+            }
+        }
+        if candidates.is_empty() {
+            return missing;
+        }
+
+        let names = candidates
             .iter()
-            .filter(|package| {
-                let Ok(requirement) = parse_python_requirement(package) else {
-                    return true;
-                };
-                let expression = format!(
-                    "import importlib.metadata as m; m.version({:?})",
-                    requirement.name
-                );
-                !self.run_check(&["python", "-I", "-c", &expression])
-            })
-            .cloned()
-            .collect()
+            .map(|(_, name)| name.as_str())
+            .collect::<Vec<_>>();
+        let Ok(names) = serde_json::to_string(&names) else {
+            missing.extend(candidates.into_iter().map(|(package, _)| package.clone()));
+            return missing;
+        };
+        let expression = format!(
+            "import importlib.metadata as m\nfor name in {names}:\n    try:\n        m.version(name)\n    except m.PackageNotFoundError:\n        print(name)"
+        );
+        let Some(output) = self.run_check_output(&["python", "-I", "-c", &expression]) else {
+            missing.extend(candidates.into_iter().map(|(package, _)| package.clone()));
+            return missing;
+        };
+        if !output.status.success() {
+            missing.extend(candidates.into_iter().map(|(package, _)| package.clone()));
+            return missing;
+        }
+        let output = String::from_utf8_lossy(&output.stdout);
+        let missing_names = output.lines().collect::<std::collections::BTreeSet<_>>();
+        missing.extend(
+            candidates
+                .into_iter()
+                .filter(|(_, name)| missing_names.contains(name.as_str()))
+                .map(|(package, _)| package.clone()),
+        );
+        missing
     }
 
     fn install_source_r_packages(
@@ -494,7 +627,7 @@ impl EnvironmentBackend {
 
         let staged_lock = self.staged_pak_lock_path();
         if staged_lock.is_file() {
-            fs::remove_file(&staged_lock)?;
+            fs::remove_file(staged_lock)?;
         }
 
         let locked_r = existing_lock.and_then(|lock| lock.r.as_ref());
@@ -510,7 +643,7 @@ impl EnvironmentBackend {
                      to update the R source resolution."
                 );
             }
-            write_json(&staged_lock, &lock.pak)
+            write_json(staged_lock, &lock.pak)
                 .context("could not stage the R source resolution from dual.lock")?;
         }
 
@@ -557,7 +690,7 @@ impl EnvironmentBackend {
             if use_existing_lock {
                 locked_r.cloned()
             } else {
-                let pak = read_json(&staged_lock)
+                let pak = read_json(staged_lock)
                     .context("pak did not produce a readable R source resolution")?;
                 Some(RSourceLock {
                     sources: packages
@@ -644,13 +777,13 @@ impl Backend for EnvironmentBackend {
         if !path.is_file() {
             anyhow::bail!("dual.lock was not found. Run `dual up` first.");
         }
-        let contents = security::read_text_file(&path, MAX_LOCK_BYTES, "dual.lock")?;
-        let lock = read_dual_lock(&path)?;
+        let contents = security::read_text_file(path, MAX_LOCK_BYTES, "dual.lock")?;
+        let lock = read_dual_lock(path)?;
         let current = serde_json::to_string_pretty(&lock)? + "\n";
         if contents == current {
             return Ok(false);
         }
-        write_dual_lock(&path, &lock)?;
+        write_dual_lock(path, &lock)?;
         Ok(true)
     }
 
@@ -662,12 +795,12 @@ impl Backend for EnvironmentBackend {
 
     fn verify_manifest(&self, config: &Config) -> Result<()> {
         self.ensure_state_paths_safe()?;
-        if !self.environment_exists() {
+        if !self.ready_path().is_file() || !self.manifest_path().is_file() {
             anyhow::bail!("The project environment has not been created. Run `dual up` first.");
         }
         let expected = generate_manifest(config, &self.root)?;
         let actual =
-            security::read_text_file(&self.manifest_path(), MAX_LOCK_BYTES, "generated manifest")?;
+            security::read_text_file(self.manifest_path(), MAX_LOCK_BYTES, "generated manifest")?;
         if actual != expected {
             anyhow::bail!(
                 "The generated environment manifest does not match dual.toml. \
@@ -684,14 +817,14 @@ impl Backend for EnvironmentBackend {
             fs::remove_file(self.ready_path())?;
         }
         let existing_lock = if self.public_lock_path().is_file() && !refresh {
-            Some(read_dual_lock(&self.public_lock_path())?)
+            Some(read_dual_lock(self.public_lock_path())?)
         } else {
             None
         };
         let generated = generate_manifest(config, &self.root)?;
         if self.manifest_path().exists() {
             let existing = security::read_text_file(
-                &self.manifest_path(),
+                self.manifest_path(),
                 MAX_LOCK_BYTES,
                 "generated manifest",
             )
@@ -706,7 +839,7 @@ impl Backend for EnvironmentBackend {
         let use_locked_install = should_use_locked_install(existing_lock.is_some(), refresh);
 
         security::write_file_atomic(
-            &self.manifest_path(),
+            self.manifest_path(),
             generated.as_bytes(),
             "generated manifest",
         )
@@ -750,14 +883,14 @@ impl Backend for EnvironmentBackend {
         if result.is_ok() {
             let finalize = (|| {
                 let pixi = security::read_text_file(
-                    &self.backend_lock_path(),
+                    self.backend_lock_path(),
                     MAX_LOCK_BYTES,
                     "environment resolution",
                 )
                 .context("Dual environment support did not produce a lock resolution")?;
                 let r = self.install_source_r_packages(config, existing_lock.as_ref(), refresh)?;
                 write_dual_lock(
-                    &self.public_lock_path(),
+                    self.public_lock_path(),
                     &DualLock {
                         version: 1,
                         environment: pixi,
@@ -780,11 +913,7 @@ impl Backend for EnvironmentBackend {
             {
                 self.prepare_bridge()?;
             }
-            security::write_file_atomic(
-                &self.ready_path(),
-                b"ready\n",
-                "environment ready marker",
-            )?;
+            security::write_file_atomic(self.ready_path(), b"ready\n", "environment ready marker")?;
         } else {
             self.finish_lock()?;
         }
@@ -826,29 +955,28 @@ impl Backend for EnvironmentBackend {
         Ok(())
     }
 
-    fn run(&self, config: &Config, task: &str) -> Result<()> {
+    fn run(&self, config: &Config, task: &str, args: &[String]) -> Result<()> {
         self.verify_manifest(config)?;
-        self.ensure_state_paths_safe()?;
         self.stage_lock()?;
         let manifest = self.manifest_arg();
-        let result = self.execute_task(
-            &[
-                "run",
-                "--manifest-path",
-                &manifest,
-                "--locked",
-                "--quiet",
-                task,
-            ],
+        let mut command = self.configured_command(&[
+            "run",
+            "--manifest-path",
+            &manifest,
+            "--locked",
+            "--quiet",
             task,
-        );
+        ])?;
+        if !args.is_empty() {
+            command.arg("--").args(args);
+        }
+        let result = self.execute_task_command(command, task);
         self.finish_lock()?;
         result
     }
 
     fn shell(&self, config: &Config) -> Result<()> {
         self.verify_manifest(config)?;
-        self.ensure_state_paths_safe()?;
         self.stage_lock()?;
         #[cfg(windows)]
         {
@@ -957,19 +1085,17 @@ impl Backend for EnvironmentBackend {
 #[cfg(not(windows))]
 fn unix_shell(backend: &EnvironmentBackend, config: &Config) -> Result<()> {
     let manifest = backend.manifest_arg();
-    let owned_args = [
-        "shell".to_owned(),
-        "--manifest-path".to_owned(),
-        manifest,
-        "--locked".to_owned(),
-        "--change-ps1".to_owned(),
-        "true".to_owned(),
-    ];
-    let args = owned_args.iter().map(String::as_str).collect::<Vec<_>>();
     if backend.verbose {
         eprintln!("{}", verbose_status("Opening project shell"));
     }
-    let mut command = backend.configured_command(&args)?;
+    let mut command = backend.configured_command(&[
+        "shell",
+        "--manifest-path",
+        &manifest,
+        "--locked",
+        "--change-ps1",
+        "true",
+    ])?;
     backend.prepare_shell_prompt(&config.project.name, &mut command)?;
     let status = command
         .stdin(Stdio::inherit())
@@ -1245,11 +1371,11 @@ pub fn generate_manifest(config: &Config, root: &Path) -> Result<String> {
                 tasks: config
                     .tasks
                     .iter()
-                    .map(|(name, command)| {
+                    .map(|(name, task)| {
                         (
                             name.clone(),
                             TaskSpec {
-                                cmd: command.clone(),
+                                cmd: task.command().to_owned(),
                                 cwd: project_root.clone(),
                             },
                         )
@@ -1434,30 +1560,30 @@ fn source_r_packages(config: &Config) -> Vec<&str> {
     packages
 }
 
-fn r_package_name(package: &str) -> Option<String> {
+fn r_package_name(package: &str) -> Option<Cow<'_, str>> {
     if let Some((name, reference)) = package.split_once('=') {
         if is_source_r_package(reference) {
-            return Some(name.to_owned());
+            return Some(Cow::Borrowed(name));
         }
     }
 
     let (source, reference) = match package.split_once("::") {
         Some(parts) => parts,
-        None => return Some(package.to_owned()),
+        None => return Some(Cow::Borrowed(package)),
     };
     match source {
         "cran" | "bioc" => reference
             .split(['@', '?'])
             .next()
             .filter(|name| !name.is_empty())
-            .map(str::to_owned),
+            .map(Cow::Borrowed),
         "github" => reference
             .split(['@', '#', '?'])
             .next()
             .and_then(|repository| repository.split('/').nth(1))
             .map(|repository| repository.trim_end_matches(".git"))
             .filter(|name| !name.is_empty())
-            .map(str::to_owned),
+            .map(Cow::Borrowed),
         _ => None,
     }
 }
@@ -1696,6 +1822,23 @@ fn run_with_timeout(command: &mut Command, timeout: Duration) -> Result<ExitStat
     }
 }
 
+fn run_with_output_timeout(command: &mut Command, timeout: Duration) -> Result<Output> {
+    let mut child = command.spawn()?;
+    match child.wait_timeout(timeout)? {
+        Some(_) => child
+            .wait_with_output()
+            .map_err(|error| anyhow::anyhow!(error)),
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            anyhow::bail!(
+                "Dual environment support timed out after {} seconds",
+                timeout.as_secs()
+            )
+        }
+    }
+}
+
 fn unique_suffix() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1797,7 +1940,9 @@ fn clear_engine_markers(root: &Path) -> Result<()> {
 mod tests {
     use std::collections::BTreeMap;
 
-    use crate::config::{PackageIndex, ProjectConfig, PythonConfig, QuartoConfig, RConfig};
+    use crate::config::{
+        PackageIndex, ProjectConfig, PythonConfig, QuartoConfig, RConfig, TaskConfig,
+    };
 
     use super::*;
 
@@ -1824,7 +1969,10 @@ mod tests {
                 index: vec![],
             },
             quarto: QuartoConfig::default(),
-            tasks: BTreeMap::from([("analysis".into(), "Rscript scripts/analysis.R".into())]),
+            tasks: BTreeMap::from([(
+                "analysis".into(),
+                TaskConfig::simple("Rscript scripts/analysis.R"),
+            )]),
         }
     }
 

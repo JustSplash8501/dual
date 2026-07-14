@@ -2,12 +2,16 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 use anyhow::Result;
+use serde::Serialize;
 
 use crate::backend::Backend;
 use crate::config::Config;
 use crate::platform;
 
-pub fn run(root: &Path, backend: &impl Backend) -> Result<()> {
+pub fn run(root: &Path, backend: &impl Backend, json: bool) -> Result<()> {
+    if json {
+        return run_json(root, backend);
+    }
     print_system_checks();
     println!();
     println!("Project");
@@ -109,9 +113,9 @@ pub fn run(root: &Path, backend: &impl Backend) -> Result<()> {
     if config.tasks.is_empty() {
         println!("⚠ no tasks configured");
     } else {
-        for (name, command) in &config.tasks {
+        for (name, task) in &config.tasks {
             println!("✓ {name} task configured");
-            if let Some(script) = platform::referenced_script(command) {
+            if let Some(script) = platform::referenced_script(task.command()) {
                 if !root.join(&script).exists() {
                     println!("✗ {} does not exist", script.display());
                 }
@@ -130,12 +134,117 @@ pub fn run(root: &Path, backend: &impl Backend) -> Result<()> {
     Ok(())
 }
 
-pub fn run_system() -> Result<()> {
+pub fn run_system(json: bool) -> Result<()> {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "project": {
+                    "config_present": false,
+                    "message": "no dual.toml found from the current directory"
+                }
+            }))?
+        );
+        return Ok(());
+    }
     print_system_checks();
     println!("\nProject");
     println!("⚠ no dual.toml found from the current directory");
     println!("\nSuggested fixes:\n  dual init");
     Ok(())
+}
+
+fn run_json(root: &Path, backend: &impl Backend) -> Result<()> {
+    let config_path = Config::path(root);
+    if !config_path.exists() {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "project": { "config_present": false }
+            }))?
+        );
+        return Ok(());
+    }
+    let config = Config::load(root)?;
+    let report = backend.doctor(&config)?;
+    let task_reports = config
+        .tasks
+        .iter()
+        .map(|(name, task)| DoctorTask {
+            name: name.clone(),
+            command: task.command().to_owned(),
+            deps: task.deps().to_vec(),
+            referenced_script_exists: platform::referenced_script(task.command())
+                .map(|script| root.join(script).exists()),
+        })
+        .collect::<Vec<_>>();
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&DoctorReport {
+            project: DoctorProject {
+                config_present: true,
+                config_valid: true,
+                name: config.project.name,
+            },
+            environment: DoctorEnvironment {
+                support_available: report.available,
+                present: report.environment_present,
+                lock_present: report.lock_present,
+            },
+            r: DoctorLanguage {
+                enabled: config.r.enabled,
+                available: report.r_available,
+                missing_packages: report.missing_r_packages,
+            },
+            python: DoctorLanguage {
+                enabled: config.python.enabled,
+                available: report.python_available,
+                missing_packages: report.missing_python_packages,
+            },
+            bridge: report.bridge,
+            tasks: task_reports,
+        })?
+    );
+    Ok(())
+}
+
+#[derive(Serialize)]
+struct DoctorReport {
+    project: DoctorProject,
+    environment: DoctorEnvironment,
+    r: DoctorLanguage,
+    python: DoctorLanguage,
+    bridge: Option<crate::backend::BridgeReport>,
+    tasks: Vec<DoctorTask>,
+}
+
+#[derive(Serialize)]
+struct DoctorProject {
+    config_present: bool,
+    config_valid: bool,
+    name: String,
+}
+
+#[derive(Serialize)]
+struct DoctorEnvironment {
+    support_available: bool,
+    present: bool,
+    lock_present: bool,
+}
+
+#[derive(Serialize)]
+struct DoctorLanguage {
+    enabled: bool,
+    available: Option<bool>,
+    missing_packages: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct DoctorTask {
+    name: String,
+    command: String,
+    deps: Vec<String>,
+    referenced_script_exists: Option<bool>,
 }
 
 fn print_system_checks() {
