@@ -45,6 +45,21 @@ pub fn import_file(project_root: &Path, source: &Path) -> Result<ImportReport> {
     if !path.is_file() {
         anyhow::bail!("import source was not found: {}", path.display());
     }
+    let canonical_project_root = project_root.canonicalize().with_context(|| {
+        format!(
+            "could not canonicalize project root {}",
+            project_root.display()
+        )
+    })?;
+    let canonical_source = path
+        .canonicalize()
+        .with_context(|| format!("could not canonicalize import source {}", path.display()))?;
+    if !canonical_source.starts_with(&canonical_project_root) {
+        anyhow::bail!(
+            "import source must be inside the project: {}",
+            path.display()
+        );
+    }
     let contents = security::read_text_file(&path, MAX_CONFIG_BYTES, "import source")?;
     let file_name = path
         .file_name()
@@ -122,8 +137,11 @@ fn apply_import(project_root: &Path, data: &ImportData) -> Result<()> {
         append_package_values(&mut document, "r", key, packages.into_iter())?;
     }
 
-    security::write_file_atomic(&config_path, document.to_string().as_bytes(), "dual.toml")?;
-    Config::from_path(&config_path)?;
+    let rendered = document.to_string();
+    let config = toml::from_str::<Config>(&rendered)
+        .map_err(|error| crate::errors::DualError::InvalidConfig(error.to_string()))?;
+    config.validate()?;
+    security::write_file_atomic(&config_path, rendered.as_bytes(), "dual.toml")?;
     Ok(())
 }
 

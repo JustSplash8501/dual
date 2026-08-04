@@ -171,7 +171,11 @@ fn prepare_script_config(effective: &mut EffectiveConfig) -> Result<()> {
 fn script_command(root: &Path, script: &Path, kind: ScriptKind) -> Result<String> {
     let relative = script.strip_prefix(root).unwrap_or(script);
     let path = relative.to_string_lossy();
-    if path.contains(['\n', '\r', '"']) {
+    if path.contains(['\n', '\r', '"', '\'', '$', '`']) {
+        anyhow::bail!("script path contains characters that cannot be executed safely");
+    }
+    #[cfg(not(windows))]
+    if path.contains('\\') {
         anyhow::bail!("script path contains characters that cannot be executed safely");
     }
     let quoted = format!("\"{path}\"");

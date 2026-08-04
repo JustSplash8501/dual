@@ -101,6 +101,14 @@ pub fn write_file_atomic(path: &Path, contents: &[u8], label: &str) -> Result<()
         let _ = fs::remove_file(&temporary);
         return Err(error).with_context(|| format!("could not update {}", path.display()));
     }
+    #[cfg(unix)]
+    {
+        let directory = fs::File::open(parent)
+            .with_context(|| format!("could not open directory for {}", path.display()))?;
+        directory
+            .sync_all()
+            .with_context(|| format!("could not sync directory for {}", path.display()))?;
+    }
     Ok(())
 }
 

@@ -425,6 +425,51 @@ version = "2.0.0"
 }
 
 #[test]
+fn failed_import_does_not_modify_config() {
+    let directory = initialized_project();
+    let config_path = directory.path().join("dual.toml");
+    let before = fs::read_to_string(&config_path).unwrap();
+    fs::write(
+        directory.path().join("environment.yml"),
+        "dependencies:\n  - python=3.12;bad\n  - pip:\n    - rich\n",
+    )
+    .unwrap();
+
+    Command::cargo_bin("dual")
+        .unwrap()
+        .current_dir(directory.path())
+        .args(["import", "environment.yml"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "python.version contains unsupported characters",
+        ));
+
+    assert_eq!(fs::read_to_string(config_path).unwrap(), before);
+}
+
+#[test]
+fn import_rejects_sources_outside_the_project() {
+    let directory = initialized_project();
+    let outside = tempdir().unwrap();
+    let source = outside.path().join("requirements.txt");
+    fs::write(&source, "rich\n").unwrap();
+
+    Command::cargo_bin("dual")
+        .unwrap()
+        .current_dir(directory.path())
+        .args(["import", source.to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "import source must be inside the project",
+        ));
+
+    let config = fs::read_to_string(directory.path().join("dual.toml")).unwrap();
+    assert!(!config.contains("rich"));
+}
+
+#[test]
 fn doctor_reports_system_status_without_a_project() {
     let directory = tempdir().unwrap();
     Command::cargo_bin("dual")
@@ -1248,6 +1293,34 @@ fn run_script_dry_run_shows_trailing_args() {
         .stdout(predicate::str::contains(
             "Would run: python \"analysis.py\" --input data.csv --limit 10",
         ));
+}
+
+#[cfg(unix)]
+#[test]
+fn run_script_rejects_shell_active_paths() {
+    let directory = initialized_project();
+    let script = directory.path().join("report$(touch dual-owned).qmd");
+    fs::write(
+        &script,
+        "<!-- /// script\npython = \"3.12\"\n/// -->\n\n```{python}\nprint('ok')\n```\n",
+    )
+    .unwrap();
+
+    Command::cargo_bin("dual")
+        .unwrap()
+        .current_dir(directory.path())
+        .args([
+            "run",
+            script.file_name().unwrap().to_str().unwrap(),
+            "--dry-run",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "script path contains characters that cannot be executed safely",
+        ));
+
+    assert!(!directory.path().join("dual-owned").exists());
 }
 
 #[cfg(unix)]
