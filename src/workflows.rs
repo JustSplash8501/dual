@@ -62,7 +62,6 @@ pub fn run_script(
         backend.verify_manifest(&effective.config)?;
     } else {
         backend.init_or_update(&effective.config, true)?;
-        backend.validate(&effective.config)?;
         security::verify_project_unchanged(&effective.root, &trust)?;
         security::refresh_project_trust(&effective.root)?;
     }
@@ -107,7 +106,6 @@ pub fn sync_script(path: &Path, verbose: bool, trust_project: bool, dry_run: boo
     backend.ensure_available()?;
     security::verify_project_unchanged(&effective.root, &trust)?;
     backend.init_or_update(&effective.config, true)?;
-    backend.validate(&effective.config)?;
     security::verify_project_unchanged(&effective.root, &trust)?;
     security::refresh_project_trust(&effective.root)?;
     println!("Script environment is ready.");
@@ -138,7 +136,6 @@ fn sync_config(
     backend.ensure_available()?;
     security::verify_project_unchanged(root, &trust)?;
     backend.init_or_update(config, refresh)?;
-    backend.validate(config)?;
     security::verify_project_unchanged(root, &trust)?;
     security::refresh_project_trust(root)
 }

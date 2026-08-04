@@ -23,6 +23,83 @@ fn init_creates_expected_files() {
 }
 
 #[test]
+fn init_supports_python_only_r_only_and_explicit_mixed_projects() {
+    for (args, present, absent, version) in [
+        (
+            vec!["init", "python-project", "--python", "3.13"],
+            "[python]",
+            "[r]",
+            "version = \"3.13\"",
+        ),
+        (
+            vec!["init", "r-project", "--r", "4.4"],
+            "[r]",
+            "[python]",
+            "version = \"4.4\"",
+        ),
+    ] {
+        let directory = tempdir().unwrap();
+        Command::cargo_bin("dual")
+            .unwrap()
+            .current_dir(directory.path())
+            .args(args)
+            .assert()
+            .success();
+        let config = fs::read_to_string(directory.path().join("dual.toml")).unwrap();
+        assert!(config.contains(present));
+        assert!(!config.contains(absent));
+        assert!(config.contains(version));
+        dual::config::Config::load(directory.path()).unwrap();
+
+        Command::cargo_bin("dual")
+            .unwrap()
+            .current_dir(directory.path())
+            .args(["--json", "deps"])
+            .assert()
+            .success()
+            .stdout(
+                predicate::str::contains("\"enabled\": true")
+                    .and(predicate::str::contains("\"enabled\": false")),
+            );
+    }
+
+    let directory = tempdir().unwrap();
+    Command::cargo_bin("dual")
+        .unwrap()
+        .current_dir(directory.path())
+        .args(["init", "mixed-project", "--python", "3.13", "--r", "4.4"])
+        .assert()
+        .success();
+    let config = fs::read_to_string(directory.path().join("dual.toml")).unwrap();
+    assert!(config.contains("[r]"));
+    assert!(config.contains("[python]"));
+}
+
+#[test]
+fn invalid_init_language_version_preserves_existing_project() {
+    let directory = initialized_project();
+    let config_path = directory.path().join("dual.toml");
+    let before = fs::read_to_string(&config_path).unwrap();
+    fs::create_dir(directory.path().join(".dual")).unwrap();
+    fs::write(directory.path().join(".dual/ready"), "ready").unwrap();
+    fs::write(directory.path().join("dual.lock"), "lock").unwrap();
+
+    Command::cargo_bin("dual")
+        .unwrap()
+        .current_dir(directory.path())
+        .args(["init", "replacement", "--python", "3.12;bad", "--force"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "dual.toml is invalid: python.version contains unsupported characters",
+        ));
+
+    assert_eq!(fs::read_to_string(config_path).unwrap(), before);
+    assert!(directory.path().join(".dual/ready").is_file());
+    assert!(directory.path().join("dual.lock").is_file());
+}
+
+#[test]
 fn help_keeps_environment_support_commands_hidden() {
     Command::cargo_bin("dual")
         .unwrap()
@@ -603,6 +680,109 @@ fn add_py_updates_packages() {
 }
 
 #[test]
+fn add_enables_a_language_omitted_during_init() {
+    let directory = tempdir().unwrap();
+    Command::cargo_bin("dual")
+        .unwrap()
+        .current_dir(directory.path())
+        .args(["init", "python-first", "--python", "3.13"])
+        .assert()
+        .success();
+
+    Command::cargo_bin("dual")
+        .unwrap()
+        .current_dir(directory.path())
+        .args(["add", "r", "dplyr"])
+        .assert()
+        .success();
+
+    let config = fs::read_to_string(directory.path().join("dual.toml")).unwrap();
+    assert!(config.contains("[r]"));
+    assert!(config.contains("version = \"4.5\""));
+    assert!(config.contains("dplyr"));
+    let config = dual::config::Config::load(directory.path()).unwrap();
+    assert!(config.r.enabled);
+    assert!(config.python.enabled);
+
+    let directory = tempdir().unwrap();
+    Command::cargo_bin("dual")
+        .unwrap()
+        .current_dir(directory.path())
+        .args(["init", "r-first", "--r", "4.4"])
+        .assert()
+        .success();
+    Command::cargo_bin("dual")
+        .unwrap()
+        .current_dir(directory.path())
+        .args(["add", "py", "rich"])
+        .assert()
+        .success();
+
+    let config = dual::config::Config::load(directory.path()).unwrap();
+    assert!(config.r.enabled);
+    assert!(config.python.enabled);
+    assert_eq!(config.python.version, "3.12");
+    assert!(config.python.packages.contains(&"rich".to_owned()));
+}
+
+#[test]
+fn remove_from_an_omitted_language_is_a_safe_noop() {
+    let directory = tempdir().unwrap();
+    Command::cargo_bin("dual")
+        .unwrap()
+        .current_dir(directory.path())
+        .args(["init", "python-only", "--python", "3.13"])
+        .assert()
+        .success();
+    let config_path = directory.path().join("dual.toml");
+    let before = fs::read_to_string(&config_path).unwrap();
+
+    Command::cargo_bin("dual")
+        .unwrap()
+        .current_dir(directory.path())
+        .args(["remove", "r", "dplyr"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Removed 0 package(s)"));
+
+    assert_eq!(fs::read_to_string(config_path).unwrap(), before);
+}
+
+#[test]
+fn import_enables_a_language_omitted_during_init() {
+    let directory = tempdir().unwrap();
+    Command::cargo_bin("dual")
+        .unwrap()
+        .current_dir(directory.path())
+        .args(["init", "python-only", "--python", "3.13"])
+        .assert()
+        .success();
+    fs::write(
+        directory.path().join("renv.lock"),
+        r#"{
+  "R": { "Version": "4.4.0" },
+  "Packages": {
+    "dplyr": { "Package": "dplyr", "Version": "1.1.4", "Source": "CRAN" }
+  }
+}"#,
+    )
+    .unwrap();
+
+    Command::cargo_bin("dual")
+        .unwrap()
+        .current_dir(directory.path())
+        .args(["import", "renv.lock"])
+        .assert()
+        .success();
+
+    let config = dual::config::Config::load(directory.path()).unwrap();
+    assert!(config.r.enabled);
+    assert_eq!(config.r.version, "4.4.0");
+    assert!(config.r.packages.contains(&"cran::dplyr@1.1.4".to_owned()));
+    assert!(config.python.enabled);
+}
+
+#[test]
 fn remove_packages_updates_config() {
     let directory = initialized_project();
     Command::cargo_bin("dual")
@@ -1046,6 +1226,36 @@ fn up_enforces_an_existing_shared_lockfile() {
 
 #[cfg(unix)]
 #[test]
+fn single_language_up_reports_only_the_enabled_runtime() {
+    let python = backend_fixture();
+    fs::write(
+        python.project.path().join("dual.toml"),
+        dual::config::starter_config("python-only", Some("3.12"), None).unwrap(),
+    )
+    .unwrap();
+    dual_command(&python).arg("up").assert().success().stdout(
+        predicate::str::contains("✓ Python 3.12 requested")
+            .and(predicate::str::contains("✓ Python packages configured"))
+            .and(predicate::str::contains("✓ R ").not())
+            .and(predicate::str::contains("✓ R packages configured").not()),
+    );
+
+    let r = backend_fixture();
+    fs::write(
+        r.project.path().join("dual.toml"),
+        dual::config::starter_config("r-only", None, Some("4.5")).unwrap(),
+    )
+    .unwrap();
+    dual_command(&r).arg("up").assert().success().stdout(
+        predicate::str::contains("✓ R 4.5 requested")
+            .and(predicate::str::contains("✓ R packages configured"))
+            .and(predicate::str::contains("✓ Python ").not())
+            .and(predicate::str::contains("✓ Python packages configured").not()),
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn up_refresh_intentionally_updates_the_shared_lockfile() {
     let fixture = backend_fixture();
     fs::write(fixture.project.path().join("dual.lock"), "old lock").unwrap();
@@ -1080,6 +1290,155 @@ fn stale_shared_lock_explains_how_to_refresh() {
             predicate::str::contains("shared lockfile does not match dual.toml")
                 .and(predicate::str::contains("dual up --refresh")),
         );
+}
+
+#[cfg(unix)]
+#[test]
+fn failed_environment_install_restores_the_previous_ready_state() {
+    let fixture = backend_fixture();
+    configure_analysis_task(fixture.project.path());
+    dual_command(&fixture).arg("up").assert().success();
+    let config = fs::read(fixture.project.path().join("dual.toml")).unwrap();
+    let before = managed_update_state(fixture.project.path());
+
+    dual_command(&fixture)
+        .args(["add", "py", "certifi"])
+        .assert()
+        .success();
+    dual_command(&fixture)
+        .env("DUAL_ENGINE_FAIL_INSTALL", "1")
+        .args(["up", "--refresh"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "The previous project environment was preserved",
+        ));
+
+    assert_eq!(managed_update_state(fixture.project.path()), before);
+    assert_update_temporaries_removed(fixture.project.path());
+    fs::write(fixture.project.path().join("dual.toml"), config).unwrap();
+    dual_command(&fixture)
+        .env("DUAL_FAKE_TASK_OUTPUT", "previous environment works")
+        .args(["run", "analysis"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("previous environment works"));
+}
+
+#[cfg(unix)]
+#[test]
+fn failed_first_install_removes_incomplete_managed_state() {
+    let fixture = backend_fixture();
+    let script_state = fixture.project.path().join(".dual/scripts/keep");
+    fs::create_dir_all(&script_state).unwrap();
+    fs::write(script_state.join("ready"), "script ready\n").unwrap();
+
+    dual_command(&fixture)
+        .env("DUAL_ENGINE_FAIL_INSTALL", "1")
+        .arg("up")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "Incomplete environment state was removed",
+        ));
+
+    assert!(fixture
+        .project
+        .path()
+        .join(".dual/scripts/keep/ready")
+        .is_file());
+    assert!(!fixture.project.path().join(".dual/workspace").exists());
+    assert!(!fixture.project.path().join(".dual/environments").exists());
+    assert!(!fixture.project.path().join(".dual/ready").exists());
+    assert!(!fixture.project.path().join("dual.lock").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn failed_source_package_install_restores_manifest_lock_and_readiness() {
+    let fixture = backend_fixture();
+    dual_command(&fixture).arg("up").assert().success();
+    let before = managed_update_state(fixture.project.path());
+
+    dual_command(&fixture)
+        .args(["add", "r", "cran::targets@1.11.4"])
+        .assert()
+        .success();
+    dual_command(&fixture)
+        .env("DUAL_ENGINE_FAIL_SOURCE", "1")
+        .args(["up", "--refresh"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "The previous project environment was preserved",
+        ));
+
+    assert_eq!(managed_update_state(fixture.project.path()), before);
+    assert_update_temporaries_removed(fixture.project.path());
+}
+
+#[cfg(unix)]
+#[test]
+fn failed_validation_restores_manifest_lock_and_readiness() {
+    let fixture = backend_fixture();
+    dual_command(&fixture).arg("up").assert().success();
+    let before = managed_update_state(fixture.project.path());
+
+    dual_command(&fixture)
+        .args(["add", "py", "certifi"])
+        .assert()
+        .success();
+    dual_command(&fixture)
+        .env("DUAL_ENGINE_FAIL_VALIDATE", "1")
+        .args(["up", "--refresh"])
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("R could not start").and(predicate::str::contains(
+                "The previous project environment was preserved",
+            )),
+        );
+
+    assert_eq!(managed_update_state(fixture.project.path()), before);
+    assert_update_temporaries_removed(fixture.project.path());
+}
+
+#[cfg(unix)]
+#[test]
+fn failed_bridge_rebuild_restores_the_previous_bridge_and_managed_state() {
+    let fixture = backend_fixture();
+    dual_command(&fixture)
+        .args(["add", "r", "reticulate"])
+        .assert()
+        .success();
+    dual_command(&fixture).arg("up").assert().success();
+    let before = managed_update_state(fixture.project.path());
+    let marker = fixture.project.path().join(".dual/bridge/marker");
+    let bridge_before = fs::read(&marker).unwrap();
+
+    dual_command(&fixture)
+        .args(["add", "py", "certifi"])
+        .assert()
+        .success();
+    dual_command(&fixture)
+        .env("DUAL_ENGINE_FAIL_BRIDGE", "1")
+        .args(["up", "--refresh"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "The previous project environment was preserved",
+        ));
+
+    assert_eq!(managed_update_state(fixture.project.path()), before);
+    assert_eq!(fs::read(marker).unwrap(), bridge_before);
+    assert_update_temporaries_removed(fixture.project.path());
+    assert!(!fs::read_dir(fixture.project.path().join(".dual"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .any(|entry| entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with("bridge.rollback-")));
 }
 
 #[cfg(unix)]
@@ -1623,6 +1982,30 @@ fn write_ready_environment(project: &std::path::Path) {
 }
 
 #[cfg(unix)]
+fn managed_update_state(project: &std::path::Path) -> Vec<(std::path::PathBuf, Vec<u8>)> {
+    [
+        "dual.lock",
+        ".dual/ready",
+        ".dual/engine.toml",
+        ".dual/Rprofile",
+        ".dual/workspace/pyproject.toml",
+    ]
+    .into_iter()
+    .map(|relative| {
+        let path = project.join(relative);
+        (std::path::PathBuf::from(relative), fs::read(path).unwrap())
+    })
+    .collect()
+}
+
+#[cfg(unix)]
+fn assert_update_temporaries_removed(project: &std::path::Path) {
+    assert!(!project.join(".dual/workspace/pixi.lock").exists());
+    assert!(!project.join(".dual/workspace/pak.lock").exists());
+    assert!(!project.join(".dual/workspace/.pixi").exists());
+}
+
+#[cfg(unix)]
 struct BackendFixture {
     project: tempfile::TempDir,
     _bin: tempfile::TempDir,
@@ -1645,6 +2028,7 @@ printf '%s\n' "$*" >> "$DUAL_ENGINE_LOG"
 command_name=""
 manifest=""
 previous=""
+last_argument=""
 for argument in "$@"; do
   if [ "$previous" = "--manifest-path" ]; then
     manifest="$argument"
@@ -1653,12 +2037,16 @@ for argument in "$@"; do
     install|run|shell) command_name="$argument" ;;
   esac
   previous="$argument"
+  last_argument="$argument"
 done
 if [ "$command_name" = "install" ]; then
   if [ -n "${GITHUB_TOKEN:-}" ] && [ -n "${DUAL_ENGINE_CREDENTIAL_LOG:-}" ]; then
     printf '%s\n' "$GITHUB_TOKEN" > "$DUAL_ENGINE_CREDENTIAL_LOG"
   fi
   if [ "${DUAL_ENGINE_FAIL_LOCKED:-0}" = "1" ] && printf '%s\n' "$*" | grep -q -- '--locked'; then
+    exit 1
+  fi
+  if [ "${DUAL_ENGINE_FAIL_INSTALL:-0}" = "1" ]; then
     exit 1
   fi
   mkdir -p "$(dirname "$manifest")"
@@ -1673,8 +2061,21 @@ if [ "$command_name" = "run" ]; then
     printf '%s\n' '# changed by task' >> dual.toml
   fi
   if printf '%s\n' "$*" | grep -q -- 'lockfile_create'; then
+    if [ "${DUAL_ENGINE_FAIL_SOURCE:-0}" = "1" ]; then
+      exit 1
+    fi
     mkdir -p .dual/workspace
     printf '{"lockfile_version":"1.0.0","packages":[]}\n' > .dual/workspace/pak.lock
+  fi
+  if printf '%s\n' "$*" | grep -q -- '-m venv'; then
+    mkdir -p "$last_argument"
+    printf '%s\n' 'working bridge' > "$last_argument/marker"
+    if [ "${DUAL_ENGINE_FAIL_BRIDGE:-0}" = "1" ]; then
+      exit 1
+    fi
+  fi
+  if [ "${DUAL_ENGINE_FAIL_VALIDATE:-0}" = "1" ] && printf '%s\n' "$*" | grep -q -- 'quit(status=0)'; then
+    exit 1
   fi
   if [ -n "${DUAL_FAKE_TASK_OUTPUT:-}" ]; then
     printf '%s\n' "$DUAL_FAKE_TASK_OUTPUT"

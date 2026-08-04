@@ -151,6 +151,7 @@ fn set_string(
     key: &str,
     value: &str,
 ) -> Result<()> {
+    config::ensure_language_table(document, section)?;
     let table = document
         .get_mut(section)
         .and_then(toml_edit::Item::as_table_mut)
@@ -179,6 +180,7 @@ fn append_package_values<'a>(
     key: &str,
     packages: impl Iterator<Item = &'a str>,
 ) -> Result<()> {
+    config::ensure_language_table(document, section)?;
     let table = document
         .get_mut(section)
         .and_then(toml_edit::Item::as_table_mut)

@@ -24,6 +24,74 @@ Set-Content dual.toml $config
 & $env:DUAL_BIN run pycheck
 if (-not (Test-Path dual.lock)) { throw "dual.lock was not created" }
 
+# Project initialization must produce complete, runnable single-language
+# environments without installing or reporting the omitted runtime.
+$mixedRoot = $root
+$pythonOnly = Join-Path $env:RUNNER_TEMP "dual-python-only"
+Remove-Item -Recurse -Force $pythonOnly -ErrorAction SilentlyContinue
+New-Item -ItemType Directory -Path $pythonOnly | Out-Null
+Set-Location $pythonOnly
+& $env:DUAL_BIN init python-only --python 3.12
+& $env:DUAL_BIN add py "six==1.17.0"
+$config = Get-Content dual.toml -Raw
+$pythonTask = @'
+[tasks]
+pycheck = 'python -c "import six; print(six.__version__)"'
+'@
+$config = $config.Replace("[tasks]", $pythonTask.Trim())
+Set-Content dual.toml $config
+$pythonUp = (& $env:DUAL_BIN --trust-project up) -join "`n"
+if (-not ($pythonUp -match "Python 3.12 requested")) {
+    throw "Python-only preparation did not report Python"
+}
+if ($pythonUp -match "R packages configured") {
+    throw "Python-only preparation reported R packages"
+}
+$pythonRun = (& $env:DUAL_BIN run pycheck) -join "`n"
+if (-not ($pythonRun -match "1.17.0")) { throw "Python-only task failed" }
+$pythonDoctor = (& $env:DUAL_BIN doctor) -join "`n"
+if (-not ($pythonDoctor -match "R is not required by this environment")) {
+    throw "Python-only doctor report treated R as enabled"
+}
+if (-not (Test-Path dual.lock)) { throw "Python-only lockfile was not created" }
+$pythonManifest = Get-Content ".dual/workspace/pyproject.toml" -Raw
+if (-not ($pythonManifest -match "(?m)^python = ")) {
+    throw "Python-only manifest omitted Python"
+}
+if ($pythonManifest -match "r-base") { throw "Python-only manifest contains R" }
+
+$rOnly = Join-Path $env:RUNNER_TEMP "dual-r-only"
+Remove-Item -Recurse -Force $rOnly -ErrorAction SilentlyContinue
+New-Item -ItemType Directory -Path $rOnly | Out-Null
+Set-Location $rOnly
+& $env:DUAL_BIN init r-only --r 4.5
+& $env:DUAL_BIN add r jsonlite
+$config = Get-Content dual.toml -Raw
+$rTask = @'
+[tasks]
+rcheck = 'Rscript -e "cat(jsonlite::toJSON(list(ok=TRUE)))"'
+'@
+$config = $config.Replace("[tasks]", $rTask.Trim())
+Set-Content dual.toml $config
+$rUp = (& $env:DUAL_BIN --trust-project up) -join "`n"
+if (-not ($rUp -match "R 4.5 requested")) {
+    throw "R-only preparation did not report R"
+}
+if ($rUp -match "Python packages configured") {
+    throw "R-only preparation reported Python packages"
+}
+$rRun = (& $env:DUAL_BIN run rcheck) -join "`n"
+if (-not ($rRun -match '"ok":\[true\]')) { throw "R-only task failed" }
+$rDoctor = (& $env:DUAL_BIN doctor) -join "`n"
+if (-not ($rDoctor -match "Python is not required by this environment")) {
+    throw "R-only doctor report treated Python as enabled"
+}
+if (-not (Test-Path dual.lock)) { throw "R-only lockfile was not created" }
+$rManifest = Get-Content ".dual/workspace/pyproject.toml" -Raw
+if (-not ($rManifest -match "r-base")) { throw "R-only manifest omitted R" }
+if ($rManifest -match "(?m)^python = ") { throw "R-only manifest contains Python" }
+Set-Location $mixedRoot
+
 # Project-backed Quarto metadata must merge with dual.toml without replacing
 # the project's environment manifest or shared lockfile.
 $projectManifestHash = (Get-FileHash ".dual/workspace/pyproject.toml" -Algorithm SHA256).Hash

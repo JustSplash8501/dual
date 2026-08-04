@@ -49,6 +49,19 @@ struct BackendPaths {
     config_path: PathBuf,
 }
 
+struct FileSnapshot {
+    path: PathBuf,
+    contents: Option<Vec<u8>>,
+    label: &'static str,
+}
+
+struct UpdateSnapshot {
+    files: Vec<FileSnapshot>,
+    directories: Vec<(PathBuf, bool)>,
+    state_dir_existed: bool,
+    had_ready_environment: bool,
+}
+
 impl BackendPaths {
     fn new(state_dir: &Path) -> Self {
         let workspace_dir = state_dir.join("workspace");
@@ -60,6 +73,152 @@ impl BackendPaths {
             ready_path: state_dir.join("ready"),
             config_path: state_dir.join("engine.toml"),
             workspace_dir,
+        }
+    }
+}
+
+impl FileSnapshot {
+    fn capture(root: &Path, path: PathBuf, label: &'static str, limit: u64) -> Result<Self> {
+        security::ensure_managed_path(root, &path)?;
+        security::reject_symlink_if_present(&path, label)?;
+        let contents = if path.is_file() {
+            Some(security::read_file(&path, limit, label)?)
+        } else if path.exists() {
+            anyhow::bail!("{label} is not a regular file: {}", path.display());
+        } else {
+            None
+        };
+        Ok(Self {
+            path,
+            contents,
+            label,
+        })
+    }
+
+    fn restore(&self, root: &Path) -> Result<()> {
+        security::ensure_managed_path(root, &self.path)?;
+        security::reject_symlink_if_present(&self.path, self.label)?;
+        if let Some(contents) = &self.contents {
+            security::write_file_atomic(&self.path, contents, self.label)
+        } else if self.path.is_file() {
+            fs::remove_file(&self.path)
+                .with_context(|| format!("could not remove {}", self.path.display()))
+        } else if self.path.exists() {
+            anyhow::bail!(
+                "{} is not a regular file: {}",
+                self.label,
+                self.path.display()
+            )
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl UpdateSnapshot {
+    fn capture(backend: &EnvironmentBackend) -> Result<Self> {
+        const SMALL_MANAGED_FILE_LIMIT: u64 = 1024 * 1024;
+        let state_dir_existed = backend.state_dir().exists();
+        let had_ready_environment = backend.ready_path().is_file();
+        let directories = vec![
+            (
+                backend.workspace_dir().to_owned(),
+                backend.workspace_dir().exists(),
+            ),
+            (
+                backend.state_dir().join("environments"),
+                backend.state_dir().join("environments").exists(),
+            ),
+        ];
+        let files = vec![
+            FileSnapshot::capture(
+                &backend.root,
+                backend.manifest_path().to_owned(),
+                "generated manifest",
+                MAX_LOCK_BYTES,
+            )?,
+            FileSnapshot::capture(
+                &backend.root,
+                backend.public_lock_path().to_owned(),
+                "dual.lock",
+                MAX_LOCK_BYTES,
+            )?,
+            FileSnapshot::capture(
+                &backend.root,
+                backend.ready_path().to_owned(),
+                "environment ready marker",
+                SMALL_MANAGED_FILE_LIMIT,
+            )?,
+            FileSnapshot::capture(
+                &backend.root,
+                backend.config_path().to_owned(),
+                "internal environment configuration",
+                SMALL_MANAGED_FILE_LIMIT,
+            )?,
+            FileSnapshot::capture(
+                &backend.root,
+                backend.r_profile_path(),
+                "managed R startup profile",
+                SMALL_MANAGED_FILE_LIMIT,
+            )?,
+        ];
+        Ok(Self {
+            files,
+            directories,
+            state_dir_existed,
+            had_ready_environment,
+        })
+    }
+
+    fn restore(&self, root: &Path) -> Result<()> {
+        let mut failures = Vec::new();
+        for file in &self.files {
+            if let Err(error) = file.restore(root) {
+                failures.push(format!("{}: {error:#}", file.path.display()));
+            }
+        }
+        for (directory, existed) in &self.directories {
+            if !existed && directory.exists() {
+                let remove = (|| {
+                    security::ensure_managed_path(root, directory)?;
+                    security::reject_symlink(directory, "generated environment directory")?;
+                    fs::remove_dir_all(directory)
+                        .context("could not remove incomplete environment directory")
+                })();
+                if let Err(error) = remove {
+                    failures.push(format!("{}: {error:#}", directory.display()));
+                }
+            }
+        }
+        if !self.state_dir_existed {
+            let state_dir = self
+                .files
+                .iter()
+                .find(|file| file.label == "environment ready marker")
+                .and_then(|file| file.path.parent())
+                .expect("ready marker has a parent directory");
+            security::ensure_managed_path(root, state_dir)?;
+            if state_dir.exists() {
+                security::reject_symlink(state_dir, "managed environment state")?;
+                fs::remove_dir_all(state_dir)
+                    .context("could not remove incomplete environment state")?;
+            }
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            anyhow::bail!(
+                "could not restore managed environment state: {}",
+                failures.join("; ")
+            )
+        }
+    }
+
+    fn recovery_message(&self) -> &'static str {
+        if self.had_ready_environment {
+            "The previous project environment was preserved."
+        } else {
+            "Incomplete environment state was removed."
         }
     }
 }
@@ -716,27 +875,78 @@ impl EnvironmentBackend {
         Ok(resolved)
     }
 
-    fn prepare_bridge(&self) -> Result<()> {
-        self.stage_lock()?;
-        let manifest = self.manifest_arg();
-        let bridge = self.bridge_dir().to_string_lossy().into_owned();
-        let output = self.capture(&[
-            "run",
-            "--manifest-path",
-            &manifest,
-            "--locked",
-            "--executable",
-            "python",
-            "-I",
-            "-m",
-            "venv",
-            "--clear",
-            "--system-site-packages",
-            &bridge,
-        ]);
-        self.finish_lock()?;
-        if !output?.success() {
-            anyhow::bail!("Could not prepare the R/Python bridge.");
+    fn prepare_bridge(&self) -> Result<Option<PathBuf>> {
+        let bridge = self.bridge_dir();
+        security::ensure_managed_path(&self.root, &bridge)?;
+        let backup = bridge.with_file_name(format!("bridge.rollback-{}", unique_suffix()));
+        security::ensure_managed_path(&self.root, &backup)?;
+        let backup = if bridge.exists() {
+            security::reject_symlink(&bridge, "managed R/Python bridge")?;
+            fs::rename(&bridge, &backup)
+                .context("could not preserve the existing R/Python bridge")?;
+            Some(backup)
+        } else {
+            None
+        };
+
+        let result = (|| {
+            self.stage_lock()?;
+            let manifest = self.manifest_arg();
+            let bridge_arg = bridge.to_string_lossy().into_owned();
+            let output = self.capture(&[
+                "run",
+                "--manifest-path",
+                &manifest,
+                "--locked",
+                "--executable",
+                "python",
+                "-I",
+                "-m",
+                "venv",
+                "--clear",
+                "--system-site-packages",
+                &bridge_arg,
+            ])?;
+            if !output.success() {
+                anyhow::bail!("Could not prepare the R/Python bridge.");
+            }
+            self.finish_lock()
+        })();
+        if let Err(error) = result {
+            let _ = self.finish_lock();
+            let rollback = self.restore_bridge(backup.as_deref());
+            return match rollback {
+                Ok(()) => Err(error),
+                Err(rollback_error) => Err(error.context(format!(
+                    "the R/Python bridge update failed and the previous bridge could not be restored: {rollback_error:#}"
+                ))),
+            };
+        }
+        Ok(backup)
+    }
+
+    fn restore_bridge(&self, backup: Option<&Path>) -> Result<()> {
+        let bridge = self.bridge_dir();
+        security::ensure_managed_path(&self.root, &bridge)?;
+        if bridge.exists() {
+            security::reject_symlink(&bridge, "managed R/Python bridge")?;
+            fs::remove_dir_all(&bridge)
+                .context("could not remove the incomplete R/Python bridge")?;
+        }
+        if let Some(backup) = backup {
+            security::ensure_managed_path(&self.root, backup)?;
+            security::reject_symlink(backup, "preserved R/Python bridge")?;
+            fs::rename(backup, &bridge)
+                .context("could not restore the previous R/Python bridge")?;
+        }
+        Ok(())
+    }
+
+    fn commit_bridge(&self, backup: Option<&Path>) -> Result<()> {
+        if let Some(backup) = backup {
+            security::ensure_managed_path(&self.root, backup)?;
+            security::reject_symlink(backup, "preserved R/Python bridge")?;
+            fs::remove_dir_all(backup).context("could not remove the previous R/Python bridge")?;
         }
         Ok(())
     }
@@ -812,112 +1022,138 @@ impl Backend for EnvironmentBackend {
 
     fn init_or_update(&self, config: &Config, refresh: bool) -> Result<()> {
         self.ensure_state_paths_safe()?;
-        self.prepare_state()?;
-        if self.ready_path().is_file() {
-            fs::remove_file(self.ready_path())?;
-        }
-        let existing_lock = if self.public_lock_path().is_file() && !refresh {
-            Some(read_dual_lock(self.public_lock_path())?)
-        } else {
-            None
-        };
-        let generated = generate_manifest(config, &self.root)?;
-        if self.manifest_path().exists() {
-            let existing = security::read_text_file(
+        let snapshot = UpdateSnapshot::capture(self)?;
+        let mut bridge_backup = None;
+        let mut bridge_prepared = false;
+        let result = (|| {
+            self.prepare_state()?;
+            if self.ready_path().is_file() {
+                fs::remove_file(self.ready_path())?;
+            }
+            let existing_lock = if self.public_lock_path().is_file() && !refresh {
+                Some(read_dual_lock(self.public_lock_path())?)
+            } else {
+                None
+            };
+            let generated = generate_manifest(config, &self.root)?;
+            if self.manifest_path().exists() {
+                let existing = security::read_text_file(
+                    self.manifest_path(),
+                    MAX_LOCK_BYTES,
+                    "generated manifest",
+                )
+                .context("could not inspect the internal environment manifest")?;
+                if !existing.starts_with(MANAGED_HEADER) {
+                    anyhow::bail!(
+                        "The internal environment manifest was not generated by dual. \
+                         Run `dual clean --yes`, then try `dual up` again."
+                    );
+                }
+            }
+            let use_locked_install = should_use_locked_install(existing_lock.is_some(), refresh);
+
+            security::write_file_atomic(
                 self.manifest_path(),
-                MAX_LOCK_BYTES,
+                generated.as_bytes(),
                 "generated manifest",
             )
-            .context("could not inspect the internal environment manifest")?;
-            if !existing.starts_with(MANAGED_HEADER) {
-                anyhow::bail!(
-                    "The internal environment manifest was not generated by dual. \
-                     Run `dual clean --yes`, then try `dual up` again."
-                );
+            .context("could not write generated environment configuration")?;
+            if refresh {
+                self.clear_backend_lock()?;
+            } else {
+                self.stage_lock()?;
             }
-        }
-        let use_locked_install = should_use_locked_install(existing_lock.is_some(), refresh);
+            let manifest = self.manifest_arg();
+            let args = if use_locked_install {
+                vec!["install", "--manifest-path", &manifest, "--locked"]
+            } else {
+                vec!["install", "--manifest-path", &manifest]
+            };
+            self.execute(&args, "Preparing the project environment")
+                .with_context(|| {
+                    if use_locked_install {
+                        return "The shared lockfile does not match dual.toml. \
+                            If dual.toml was intentionally changed, run \
+                            `dual up --refresh` to update dual.lock."
+                            .to_owned();
+                    }
+                    let inferred = config
+                        .r
+                        .packages
+                        .iter()
+                        .filter(|package| !known_r_mapping(package))
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    if inferred.is_empty() {
+                        "The requested package set could not be resolved.".to_owned()
+                    } else {
+                        format!(
+                            "Some R package names used inferred environment package names: {}.",
+                            inferred.join(", ")
+                        )
+                    }
+                })?;
 
-        security::write_file_atomic(
-            self.manifest_path(),
-            generated.as_bytes(),
-            "generated manifest",
-        )
-        .context("could not write generated environment configuration")?;
-        if refresh {
-            self.clear_backend_lock()?;
-        } else {
-            self.stage_lock()?;
-        }
-        let manifest = self.manifest_arg();
-        let args = if use_locked_install {
-            vec!["install", "--manifest-path", &manifest, "--locked"]
-        } else {
-            vec!["install", "--manifest-path", &manifest]
-        };
-        let result = self
-            .execute(&args, "Preparing the project environment")
-            .with_context(|| {
-                if use_locked_install {
-                    return "The shared lockfile does not match dual.toml. \
-                        If dual.toml was intentionally changed, run \
-                        `dual up --refresh` to update dual.lock."
-                        .to_owned();
-                }
-                let inferred = config
+            let pixi = security::read_text_file(
+                self.backend_lock_path(),
+                MAX_LOCK_BYTES,
+                "environment resolution",
+            )
+            .context("Dual environment support did not produce a lock resolution")?;
+            let r = self.install_source_r_packages(config, existing_lock.as_ref(), refresh)?;
+            write_dual_lock(
+                self.public_lock_path(),
+                &DualLock {
+                    version: 1,
+                    environment: pixi,
+                    r,
+                    metadata: Some(lock_metadata(config)),
+                },
+            )?;
+            self.finish_lock()?;
+
+            if config.python.enabled
+                && config
                     .r
                     .packages
                     .iter()
-                    .filter(|package| !known_r_mapping(package))
-                    .cloned()
-                    .collect::<Vec<_>>();
-                if inferred.is_empty() {
-                    "The requested package set could not be resolved.".to_owned()
-                } else {
-                    format!(
-                        "Some R package names used inferred environment package names: {}.",
-                        inferred.join(", ")
-                    )
-                }
-            });
-        if result.is_ok() {
-            let finalize = (|| {
-                let pixi = security::read_text_file(
-                    self.backend_lock_path(),
-                    MAX_LOCK_BYTES,
-                    "environment resolution",
-                )
-                .context("Dual environment support did not produce a lock resolution")?;
-                let r = self.install_source_r_packages(config, existing_lock.as_ref(), refresh)?;
-                write_dual_lock(
-                    self.public_lock_path(),
-                    &DualLock {
-                        version: 1,
-                        environment: pixi,
-                        r,
-                        metadata: Some(lock_metadata(config)),
-                    },
-                )
-            })();
-            if let Err(error) = finalize {
-                self.finish_lock()?;
-                return Err(error);
-            }
-            self.finish_lock()?;
-            if config
-                .r
-                .packages
-                .iter()
-                .filter_map(|package| r_package_name(package))
-                .any(|package| package.eq_ignore_ascii_case("reticulate"))
+                    .filter_map(|package| r_package_name(package))
+                    .any(|package| package.eq_ignore_ascii_case("reticulate"))
             {
-                self.prepare_bridge()?;
+                bridge_backup = self.prepare_bridge()?;
+                bridge_prepared = true;
             }
+
+            self.validate(config)?;
             security::write_file_atomic(self.ready_path(), b"ready\n", "environment ready marker")?;
-        } else {
-            self.finish_lock()?;
+            self.commit_bridge(bridge_backup.as_deref())?;
+            bridge_backup = None;
+            bridge_prepared = false;
+            Ok(())
+        })();
+
+        if let Err(error) = result {
+            let mut rollback_failures = Vec::new();
+            if let Err(cleanup_error) = self.finish_lock() {
+                rollback_failures.push(format!("temporary lock cleanup failed: {cleanup_error:#}"));
+            }
+            if bridge_prepared {
+                if let Err(bridge_error) = self.restore_bridge(bridge_backup.as_deref()) {
+                    rollback_failures.push(format!("bridge rollback failed: {bridge_error:#}"));
+                }
+            }
+            if let Err(snapshot_error) = snapshot.restore(&self.root) {
+                rollback_failures.push(format!("state rollback failed: {snapshot_error:#}"));
+            }
+            if rollback_failures.is_empty() {
+                return Err(error.context(snapshot.recovery_message()));
+            }
+            return Err(error.context(format!(
+                "The update failed and rollback was incomplete: {}",
+                rollback_failures.join("; ")
+            )));
         }
-        result
+        Ok(())
     }
 
     fn validate(&self, config: &Config) -> Result<()> {
@@ -1339,6 +1575,8 @@ pub fn generate_manifest(config: &Config, root: &Path) -> Result<String> {
     } else {
         BTreeMap::new()
     };
+    let unix_activation = activation_environment(&project_root, config, false);
+    let windows_activation = activation_environment(&project_root, config, true);
 
     let manifest = PyProject {
         project: PyProjectMetadata {
@@ -1386,18 +1624,7 @@ pub fn generate_manifest(config: &Config, root: &Path) -> Result<String> {
                         "unix".to_owned(),
                         TargetConfig {
                             activation: Activation {
-                                env: BTreeMap::from([
-                                    ("DUAL_PROJECT_ROOT".to_owned(), project_root.clone()),
-                                    (
-                                        "R_PROFILE_USER".to_owned(),
-                                        "$PIXI_PROJECT_ROOT/../Rprofile".to_owned(),
-                                    ),
-                                    (
-                                        "RETICULATE_PYTHON".to_owned(),
-                                        "$PIXI_PROJECT_ROOT/../bridge/bin/python".to_owned(),
-                                    ),
-                                    ("RETICULATE_USE_MANAGED_VENV".to_owned(), "no".to_owned()),
-                                ]),
+                                env: unix_activation,
                             },
                         },
                     ),
@@ -1405,19 +1632,7 @@ pub fn generate_manifest(config: &Config, root: &Path) -> Result<String> {
                         "win".to_owned(),
                         TargetConfig {
                             activation: Activation {
-                                env: BTreeMap::from([
-                                    ("DUAL_PROJECT_ROOT".to_owned(), project_root),
-                                    (
-                                        "R_PROFILE_USER".to_owned(),
-                                        "%PIXI_PROJECT_ROOT%\\..\\Rprofile".to_owned(),
-                                    ),
-                                    (
-                                        "RETICULATE_PYTHON".to_owned(),
-                                        "%PIXI_PROJECT_ROOT%\\..\\bridge\\Scripts\\python.exe"
-                                            .to_owned(),
-                                    ),
-                                    ("RETICULATE_USE_MANAGED_VENV".to_owned(), "no".to_owned()),
-                                ]),
+                                env: windows_activation,
                             },
                         },
                     ),
@@ -1430,6 +1645,39 @@ pub fn generate_manifest(config: &Config, root: &Path) -> Result<String> {
         "{MANAGED_HEADER}{}",
         toml::to_string_pretty(&manifest)?
     ))
+}
+
+fn activation_environment(
+    project_root: &str,
+    config: &Config,
+    windows: bool,
+) -> BTreeMap<String, String> {
+    let mut environment =
+        BTreeMap::from([("DUAL_PROJECT_ROOT".to_owned(), project_root.to_owned())]);
+    if config.r.enabled {
+        environment.insert(
+            "R_PROFILE_USER".to_owned(),
+            if windows {
+                "%PIXI_PROJECT_ROOT%\\..\\Rprofile"
+            } else {
+                "$PIXI_PROJECT_ROOT/../Rprofile"
+            }
+            .to_owned(),
+        );
+    }
+    if config.r.enabled && config.python.enabled {
+        environment.insert(
+            "RETICULATE_PYTHON".to_owned(),
+            if windows {
+                "%PIXI_PROJECT_ROOT%\\..\\bridge\\Scripts\\python.exe"
+            } else {
+                "$PIXI_PROJECT_ROOT/../bridge/bin/python"
+            }
+            .to_owned(),
+        );
+        environment.insert("RETICULATE_USE_MANAGED_VENV".to_owned(), "no".to_owned());
+    }
+    environment
 }
 
 #[cfg(windows)]
@@ -2086,6 +2334,25 @@ mod tests {
         assert!(manifest.contains("python ="));
         assert!(manifest.contains("rich ="));
         assert!(!manifest.contains("r-base"));
+        assert!(!manifest.contains("R_PROFILE_USER"));
+        assert!(!manifest.contains("RETICULATE_PYTHON"));
+
+        let config: Config = toml::from_str(
+            r#"[project]
+name = "r-only"
+
+[r]
+version = "4.5"
+cran = ["dplyr"]
+"#,
+        )
+        .unwrap();
+        let manifest = generate_manifest(&config, Path::new("/project")).unwrap();
+        assert!(manifest.contains("r-base ="));
+        assert!(manifest.contains("r-pak ="));
+        assert!(!manifest.contains("python ="));
+        assert!(manifest.contains("R_PROFILE_USER"));
+        assert!(!manifest.contains("RETICULATE_PYTHON"));
     }
 
     #[test]

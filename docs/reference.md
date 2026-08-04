@@ -87,6 +87,16 @@ model = { cmd = "python scripts/model.py", deps = ["analysis"] }
 
 ### Details
 
+The `[r]` and `[python]` sections are individually optional. Normal projects
+must contain at least one; a Quarto-only project can omit both when
+`quarto.enabled` is true. Omitting a language section prevents that runtime and
+its bridge settings from being installed. Existing mixed-language
+configurations containing both sections remain valid.
+
+When `dual add` or `dual import` introduces a dependency for an omitted
+language, Dual adds the missing section. It uses R 4.5 or Python 3.12 by default
+unless an imported file specifies a runtime version.
+
 R packages are normalized internally as source-qualified references such as `cran::dplyr`, `bioc::DESeq2`, and `github::r-lib/pak@v0.9.0`. Python dependencies are validated as simple package requirements and direct URLs or environment markers are rejected.
 
 Task dependencies are resolved before execution. Dependency cycles are rejected.
@@ -169,7 +179,7 @@ When a script lives below a project containing `dual.toml`, the project configur
 #### Usage
 
 ```console
-dual init [PROJECT_NAME] [--force]
+dual init [PROJECT_NAME] [--python VERSION] [--r VERSION] [--force]
 dual init --script FILE [--python VERSION] [--r VERSION] [--force]
 ```
 
@@ -181,18 +191,20 @@ dual init --script FILE [--python VERSION] [--r VERSION] [--force]
 
 `--script FILE`: Create or update inline metadata in a `.py`, `.R`, `.qmd`, or `.Rmd` file.
 
-`--python VERSION`: Python version for script metadata.
+`--python VERSION`: Include Python at this version. When used alone for project initialization, omit R.
 
-`--r VERSION`: R version for script metadata.
+`--r VERSION`: Include R at this version. When used alone for project initialization, omit Python.
 
 #### Value
 
-Writes `dual.toml` for projects, or inserts an inline metadata block for scripts. Existing scripts are preserved except for the inserted or replaced metadata block.
+Writes `dual.toml` for projects, or inserts an inline metadata block for scripts. With no language options, project initialization remains mixed-language. Existing scripts are preserved except for the inserted or replaced metadata block.
 
 #### Examples
 
 ```console
 dual init cli-tools
+dual init python-analysis --python 3.13
+dual init r-analysis --r 4.5
 dual init --script scripts/analysis.R --r 4.5
 dual init --script report.qmd --python 3.12 --r 4.5
 ```
@@ -328,6 +340,14 @@ Creates or updates the project environment, validates it, and refreshes project 
 #### Details
 
 The environment engine is installed automatically when needed. Package tooling runs with common credential environment variables removed unless `DUAL_ALLOW_CREDENTIALS=1` is set.
+
+Updates become ready only after dependency installation, source-backed R
+package installation, R/Python bridge preparation, and runtime validation all
+succeed. On failure, Dual restores the previous generated manifest,
+`dual.lock`, readiness marker, and bridge. If no prior ready environment
+existed, incomplete generated state is removed. The attempted `dual.toml`
+change is not reverted; correct it or restore its previous contents before
+using the preserved environment.
 
 ### `dual run`
 
@@ -569,7 +589,7 @@ let config = Config::load(&root)?;
 
 #### Main Types
 
-`Config`: Typed `dual.toml` model with `project`, `r`, `python`, `quarto`, and `tasks`.
+`Config`: Typed `dual.toml` model with `project`, optional `r` and `python` languages, `quarto`, and `tasks`.
 
 `ProjectConfig`: Project metadata.
 
@@ -614,6 +634,8 @@ let config = Config::load(&root)?;
 `Config::add_packages(path, section, packages)`: Add packages to `dual.toml`.
 
 `Config::remove_packages(path, section, packages)`: Remove packages from `dual.toml`.
+
+`starter_config(project_name, python, r)`: Render and validate a new mixed- or single-language project configuration.
 
 `validate_project_name(name)`: Validate a project name.
 
@@ -926,4 +948,3 @@ let script = dual::platform::referenced_script("Rscript scripts/analysis.R");
 Package installation, task commands, lockfiles, inline metadata, and interactive shells can execute code with the current user's permissions. `dual` therefore requires project trust before installation or execution, rejects symbolic links for sensitive paths, fingerprints project files, checks for changes during execution, and removes common credential variables from package-tool subprocesses by default.
 
 Generated document outputs for Quarto and R Markdown are allowed to change during rendering, but source files are still checked after execution.
-
