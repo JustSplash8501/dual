@@ -47,11 +47,11 @@ pub enum Commands {
         #[arg(long, value_name = "FILE")]
         script: Option<PathBuf>,
 
-        /// Python version for script metadata.
+        /// Include Python at this version in a project or script.
         #[arg(long, value_name = "VERSION")]
         python: Option<String>,
 
-        /// R version for script metadata.
+        /// Include R at this version in a project or script.
         #[arg(long, value_name = "VERSION")]
         r: Option<String>,
     },

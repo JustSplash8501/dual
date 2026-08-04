@@ -26,6 +26,64 @@ PY
 "$DUAL_BIN" run pycheck
 test -s dual.lock
 
+# Project initialization must produce complete, runnable single-language
+# environments without installing or reporting the omitted runtime.
+mixed_root="$root"
+python_only="$(mktemp -d)"
+cd "$python_only"
+"$DUAL_BIN" init python-only --python 3.12
+"$DUAL_BIN" add py 'six==1.17.0'
+python3 - <<'PY'
+from pathlib import Path
+path = Path("dual.toml")
+path.write_text(path.read_text().replace(
+    "[tasks]\n",
+    "[tasks]\npycheck = \"python -c \\\"import six; print(six.__version__)\\\"\"\n",
+))
+PY
+python_up="$("$DUAL_BIN" --trust-project up)"
+printf '%s\n' "$python_up" | grep -q "Python 3.12 requested"
+if printf '%s\n' "$python_up" | grep -q "R packages configured"; then
+    echo "Python-only preparation reported R packages" >&2
+    exit 1
+fi
+"$DUAL_BIN" run pycheck | grep -q "1.17.0"
+"$DUAL_BIN" doctor | grep -q "R is not required by this environment"
+test -s dual.lock
+grep -q 'python = ' .dual/workspace/pyproject.toml
+if grep -q 'r-base' .dual/workspace/pyproject.toml; then
+    echo "Python-only manifest contains R" >&2
+    exit 1
+fi
+
+r_only="$(mktemp -d)"
+cd "$r_only"
+"$DUAL_BIN" init r-only --r 4.5
+"$DUAL_BIN" add r jsonlite
+python3 - <<'PY'
+from pathlib import Path
+path = Path("dual.toml")
+path.write_text(path.read_text().replace(
+    "[tasks]\n",
+    "[tasks]\nrcheck = \"Rscript -e \\\"cat(jsonlite::toJSON(list(ok=TRUE)))\\\"\"\n",
+))
+PY
+r_up="$("$DUAL_BIN" --trust-project up)"
+printf '%s\n' "$r_up" | grep -q "R 4.5 requested"
+if printf '%s\n' "$r_up" | grep -q "Python packages configured"; then
+    echo "R-only preparation reported Python packages" >&2
+    exit 1
+fi
+"$DUAL_BIN" run rcheck | grep -q '"ok":\[true\]'
+"$DUAL_BIN" doctor | grep -q "Python is not required by this environment"
+test -s dual.lock
+grep -q 'r-base = ' .dual/workspace/pyproject.toml
+if grep -q '^python = ' .dual/workspace/pyproject.toml; then
+    echo "R-only manifest contains Python" >&2
+    exit 1
+fi
+cd "$mixed_root"
+
 # Project-backed Quarto metadata must merge with dual.toml without replacing
 # the project's environment manifest or shared lockfile.
 project_manifest_hash="$(python3 - <<'PY'

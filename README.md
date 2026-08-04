@@ -90,7 +90,8 @@ conda-forge.
 ## Commands
 
 ```text
-dual init [PROJECT_NAME] [--force]  Create dual.toml and project directories
+dual init [PROJECT_NAME] [--python VERSION] [--r VERSION]
+                                      Create dual.toml and project directories
 dual add r PACKAGE...              Add R packages
 dual add py PACKAGE...             Add Python packages
 dual remove r PACKAGE...           Remove R packages
@@ -216,6 +217,23 @@ implementations treat `dual run` as one executable name.
 When `PROJECT_NAME` is omitted, `dual init` uses the current directory name.
 Project names must start and end with a letter or number and may contain only
 ASCII letters, numbers, hyphens, and underscores.
+
+By default, `dual init` creates a mixed R and Python project. Pass one language
+option to create a smaller single-language environment, or pass both to select
+explicit versions for a mixed project:
+
+```console
+dual init python-analysis --python 3.13
+dual init r-analysis --r 4.5
+dual init mixed-analysis --python 3.13 --r 4.5
+```
+
+In `dual.toml`, `[r]` and `[python]` are individually optional. Normal projects
+require at least one; a Quarto-only project can instead set `quarto.enabled =
+true`. Existing project files containing both sections continue to work
+unchanged. Adding or importing a dependency for an omitted language adds that
+language with Dual's default runtime version unless the import provides a
+version.
 
 Commands that install packages or execute project code require explicit
 repository trust on first use:
@@ -343,6 +361,13 @@ When a collaborator receives `dual.toml` and `dual.lock`, `dual up` creates the
 environment with the shared resolution enforced.
 If `dual.toml` is intentionally changed, run `dual up --refresh` to re-resolve
 dependencies. Commit the updated `dual.toml` and `dual.lock` together.
+
+Environment updates are failure-safe. Dual does not mark a new environment as
+ready until dependency installation, source-backed R packages, bridge setup,
+and runtime validation all succeed. If an update fails, it restores the prior
+generated manifest, shared lockfile, readiness marker, and R/Python bridge. A
+failed first preparation removes its incomplete generated state; downloaded
+package caches may remain available for the next attempt.
 
 `dual clean` removes only `.dual/`. It deliberately preserves `dual.lock`,
 `dual.toml`, scripts, data, results, and other user files.

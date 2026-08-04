@@ -41,8 +41,12 @@ git switch -c feature/short-description
 Please:
 
 - Keep user-facing configuration in `dual.toml`.
+- Preserve configs with either `[r]`, `[python]`, or both; omitted languages
+  must not appear in generated environments.
 - Keep generated local state under `.dual/`.
 - Preserve `dual.lock` compatibility or provide an explicit migration.
+- Keep environment updates failure-safe: do not replace ready-state metadata
+  or the R/Python bridge unless installation and validation both succeed.
 - Avoid exposing internal environment-engine commands, names, or files.
 - Treat Linux, macOS, and Windows as first-class platforms.
 - Add or update tests for behavior changes.

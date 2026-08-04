@@ -13,6 +13,9 @@ use crate::errors::DualError;
 use crate::metadata::{self, ScriptKind, ScriptMetadata};
 use crate::security::{self, MAX_CONFIG_BYTES};
 
+pub const DEFAULT_R_VERSION: &str = "4.5";
+pub const DEFAULT_PYTHON_VERSION: &str = "3.12";
+
 pub const DEFAULT_CONFIG: &str = r#"[project]
 name = "my-project"
 
@@ -40,7 +43,9 @@ enabled = false
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub project: ProjectConfig,
+    #[serde(default, skip_serializing_if = "r_disabled")]
     pub r: RConfig,
+    #[serde(default, skip_serializing_if = "python_disabled")]
     pub python: PythonConfig,
     #[serde(default)]
     pub quarto: QuartoConfig,
@@ -66,6 +71,17 @@ pub struct PythonConfig {
     pub index: Vec<PackageIndex>,
 }
 
+impl Default for PythonConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            version: DEFAULT_PYTHON_VERSION.to_owned(),
+            packages: Vec::new(),
+            index: Vec::new(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct PackageIndex {
@@ -77,6 +93,16 @@ pub struct RConfig {
     pub enabled: bool,
     pub version: String,
     pub packages: Vec<String>,
+}
+
+impl Default for RConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            version: DEFAULT_R_VERSION.to_owned(),
+            packages: Vec::new(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -282,17 +308,8 @@ impl Config {
             project: ProjectConfig {
                 name: project_name.to_owned(),
             },
-            r: RConfig {
-                enabled: false,
-                version: "4.5".to_owned(),
-                packages: Vec::new(),
-            },
-            python: PythonConfig {
-                enabled: false,
-                version: "3.12".to_owned(),
-                packages: Vec::new(),
-                index: Vec::new(),
-            },
+            r: RConfig::default(),
+            python: PythonConfig::default(),
             quarto: QuartoConfig::default(),
             tasks: BTreeMap::new(),
         }
@@ -367,6 +384,12 @@ impl Config {
     pub fn validate(&self) -> Result<()> {
         validate_project_name(&self.project.name)
             .map_err(|error| DualError::InvalidConfig(error.to_string()))?;
+        if !self.r.enabled && !self.python.enabled && !self.quarto.enabled {
+            return Err(DualError::InvalidConfig(
+                "at least one of [r], [python], or enabled [quarto] is required".into(),
+            )
+            .into());
+        }
         validate_r(&self.r)?;
         validate_python(&self.python)?;
         for index in &self.python.index {
@@ -421,10 +444,10 @@ impl Config {
             .parse::<DocumentMut>()
             .map_err(|error| DualError::InvalidConfig(error.to_string()))?;
 
-        let table = document
-            .get_mut(section)
-            .and_then(Item::as_table_mut)
-            .ok_or_else(|| DualError::InvalidConfig(format!("[{section}] is required")))?;
+        ensure_language_table(&mut document, section)?;
+        let table = document[section]
+            .as_table_mut()
+            .expect("language section was created as a table");
 
         if section == "python" {
             let key = if table.contains_key("dependencies") {
@@ -459,10 +482,9 @@ impl Config {
         let mut document = contents
             .parse::<DocumentMut>()
             .map_err(|error| DualError::InvalidConfig(error.to_string()))?;
-        let table = document
-            .get_mut(section)
-            .and_then(Item::as_table_mut)
-            .ok_or_else(|| DualError::InvalidConfig(format!("[{section}] is required")))?;
+        let Some(table) = document.get_mut(section).and_then(Item::as_table_mut) else {
+            return Ok(0);
+        };
         let keys: &[&str] = if section == "python" {
             &["dependencies", "packages"]
         } else {
@@ -491,6 +513,64 @@ impl Config {
         Self::from_path(path)?;
         Ok(removed)
     }
+}
+
+pub(crate) fn ensure_language_table(document: &mut DocumentMut, section: &str) -> Result<()> {
+    if document.contains_key(section) {
+        if document[section].is_table() {
+            return Ok(());
+        }
+        return Err(DualError::InvalidConfig(format!("[{section}] must be a table")).into());
+    }
+
+    let version = match section {
+        "r" => DEFAULT_R_VERSION,
+        "python" => DEFAULT_PYTHON_VERSION,
+        _ => {
+            return Err(
+                DualError::InvalidConfig(format!("unknown language section: {section}")).into(),
+            )
+        }
+    };
+    let mut table = toml_edit::Table::new();
+    table.insert("version", toml_edit::value(version));
+    document.insert(section, Item::Table(table));
+    Ok(())
+}
+
+fn r_disabled(config: &RConfig) -> bool {
+    !config.enabled
+}
+
+fn python_disabled(config: &PythonConfig) -> bool {
+    !config.enabled
+}
+
+pub fn starter_config(project_name: &str, python: Option<&str>, r: Option<&str>) -> Result<String> {
+    validate_project_name(project_name)?;
+    let explicit_languages = python.is_some() || r.is_some();
+    let python = python.or((!explicit_languages).then_some(DEFAULT_PYTHON_VERSION));
+    let r = r.or((!explicit_languages).then_some(DEFAULT_R_VERSION));
+
+    let mut contents = format!("[project]\nname = \"{project_name}\"\n");
+    if let Some(version) = r {
+        contents.push_str(&format!(
+            "\n[r]\nversion = \"{version}\"\ncran = []\nbioc = []\ngithub = []\n"
+        ));
+    }
+    if let Some(version) = python {
+        contents.push_str(&format!(
+            "\n[python]\nversion = \"{version}\"\ndependencies = []\n"
+        ));
+    }
+    contents.push_str(
+        "\n[quarto]\nenabled = false\n\n[tasks]\n# Example:\n# analysis = \"Rscript scripts/analysis.R\"\n# model = \"python scripts/model.py\"\n# report = \"quarto render manuscript.qmd\"\n",
+    );
+
+    let config: Config =
+        toml::from_str(&contents).map_err(|error| DualError::InvalidConfig(error.to_string()))?;
+    config.validate()?;
+    Ok(contents)
 }
 
 fn append_to_array<'a>(
@@ -836,6 +916,88 @@ enabled = true
         assert!(config.r.packages.contains(&"bioc::DESeq2".to_owned()));
         assert!(config.r.packages.contains(&"github::hadley/emo".to_owned()));
         assert!(config.quarto.enabled);
+    }
+
+    #[test]
+    fn accepts_single_language_projects_and_omits_disabled_sections() {
+        let python: Config = toml::from_str(
+            r#"[project]
+name = "python-only"
+
+[python]
+version = "3.13"
+dependencies = ["rich"]
+"#,
+        )
+        .unwrap();
+        python.validate().unwrap();
+        assert!(!python.r.enabled);
+        assert!(python.python.enabled);
+        let rendered = toml::to_string(&python).unwrap();
+        assert!(!rendered.contains("[r]"));
+        assert!(rendered.contains("[python]"));
+
+        let r: Config = toml::from_str(
+            r#"[project]
+name = "r-only"
+
+[r]
+version = "4.5"
+cran = ["dplyr"]
+"#,
+        )
+        .unwrap();
+        r.validate().unwrap();
+        assert!(r.r.enabled);
+        assert!(!r.python.enabled);
+        let rendered = toml::to_string(&r).unwrap();
+        assert!(rendered.contains("[r]"));
+        assert!(!rendered.contains("[python]"));
+    }
+
+    #[test]
+    fn rejects_projects_without_a_language() {
+        let config: Config = toml::from_str(
+            r#"[project]
+name = "empty"
+"#,
+        )
+        .unwrap();
+        let error = config.validate().unwrap_err().to_string();
+        assert!(error.contains("at least one of [r], [python], or enabled [quarto] is required"));
+
+        let quarto: Config = toml::from_str(
+            r#"[project]
+name = "quarto-only"
+
+[quarto]
+enabled = true
+"#,
+        )
+        .unwrap();
+        quarto.validate().unwrap();
+    }
+
+    #[test]
+    fn starter_config_selects_languages_and_validates_versions() {
+        let python = starter_config("python-only", Some("3.13"), None).unwrap();
+        assert!(python.contains("[python]"));
+        assert!(python.contains("version = \"3.13\""));
+        assert!(!python.contains("[r]"));
+
+        let r = starter_config("r-only", None, Some("4.4")).unwrap();
+        assert!(r.contains("[r]"));
+        assert!(!r.contains("[python]"));
+
+        let mixed = starter_config("mixed", None, None).unwrap();
+        assert!(mixed.contains("[r]"));
+        assert!(mixed.contains("[python]"));
+        assert_eq!(
+            starter_config("my-project", None, None).unwrap(),
+            DEFAULT_CONFIG
+        );
+
+        assert!(starter_config("invalid", Some("3.12;bad"), None).is_err());
     }
 
     #[test]

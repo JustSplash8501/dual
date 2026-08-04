@@ -2,7 +2,7 @@ use anyhow::Result;
 use clap::Parser;
 use dual::backend::{Backend, EnvironmentBackend};
 use dual::cli::{Cli, Commands, EngineCommand, Language, LockCommand, TaskCommand};
-use dual::config::{validate_project_name, Config, DEFAULT_CONFIG};
+use dual::config::{starter_config, Config};
 use dual::imports;
 use dual::metadata::{self, AddOptions, ScriptLanguage};
 use dual::workflows::{self, ExportFormat};
@@ -41,13 +41,16 @@ fn run() -> Result<()> {
                 println!("Initialized inline metadata in {}.", script.display());
                 return Ok(());
             }
-            if python.is_some() || r.is_some() {
-                anyhow::bail!("`--python` and `--r` require `dual init --script FILE`");
-            }
             if name.is_some() && legacy_name.is_some() {
                 anyhow::bail!("provide the project name once: `dual init PROJECT_NAME`");
             }
-            init(&current, force, name.as_deref().or(legacy_name.as_deref()))
+            init(
+                &current,
+                force,
+                name.as_deref().or(legacy_name.as_deref()),
+                python.as_deref(),
+                r.as_deref(),
+            )
         }
         Commands::Add {
             script,
@@ -282,13 +285,20 @@ fn remove(root: &std::path::Path, language: Language, packages: &[String]) -> Re
     Ok(())
 }
 
-fn init(root: &std::path::Path, force: bool, name: Option<&str>) -> Result<()> {
+fn init(
+    root: &std::path::Path,
+    force: bool,
+    name: Option<&str>,
+    python: Option<&str>,
+    r: Option<&str>,
+) -> Result<()> {
     let inferred_name = root
         .file_name()
         .and_then(std::ffi::OsStr::to_str)
         .ok_or_else(|| anyhow::anyhow!("could not infer a project name from this directory"))?;
     let project_name = name.unwrap_or(inferred_name);
-    validate_project_name(project_name)?;
+    // Render and validate before invalidating an existing project on --force.
+    let contents = starter_config(project_name, python, r)?;
 
     let path = Config::path(root);
     security::reject_symlink_if_present(&path, "dual.toml")?;
@@ -309,11 +319,6 @@ fn init(root: &std::path::Path, force: bool, name: Option<&str>) -> Result<()> {
         println!("Invalidated the previous environment and lockfile.");
     }
 
-    let escaped_name = project_name.replace('\\', "\\\\").replace('"', "\\\"");
-    let contents = DEFAULT_CONFIG.replace(
-        "name = \"my-project\"",
-        &format!("name = \"{escaped_name}\""),
-    );
     security::write_file_atomic(&path, contents.as_bytes(), "dual.toml")?;
     for directory in ["scripts", "data", "results"] {
         std::fs::create_dir_all(root.join(directory))?;
@@ -365,17 +370,24 @@ fn up(
     let trust = security::ensure_project_trusted(root, trust_project)?;
 
     println!("Preparing project environment...");
-    println!("✓ R {} requested", config.r.version);
-    println!("✓ Python {} requested", config.python.version);
+    if config.r.enabled {
+        println!("✓ R {} requested", config.r.version);
+    }
+    if config.python.enabled {
+        println!("✓ Python {} requested", config.python.version);
+    }
 
     backend.ensure_available()?;
     security::verify_project_unchanged(root, &trust)?;
 
     backend.init_or_update(&config, refresh)?;
-    println!("✓ R packages configured");
-    println!("✓ Python packages configured");
+    if config.r.enabled {
+        println!("✓ R packages configured");
+    }
+    if config.python.enabled {
+        println!("✓ Python packages configured");
+    }
 
-    backend.validate(&config)?;
     security::verify_project_unchanged(root, &trust)?;
     security::refresh_project_trust(root)?;
     println!("✓ Project is ready");
