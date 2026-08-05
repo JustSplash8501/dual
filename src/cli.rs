@@ -98,6 +98,28 @@ pub enum Commands {
         packages: Vec<String>,
     },
 
+    /// Enable an R or Python runtime in dual.toml.
+    Enable {
+        /// Runtime to enable: r or py.
+        #[arg(value_enum)]
+        language: Language,
+
+        /// Runtime version. Uses Dual's default when enabling an omitted runtime.
+        #[arg(long, value_name = "VERSION")]
+        version: Option<String>,
+    },
+
+    /// Disable an R or Python runtime in dual.toml.
+    Disable {
+        /// Runtime to disable: r or py.
+        #[arg(value_enum)]
+        language: Language,
+
+        /// Remove configured packages and indexes with the runtime.
+        #[arg(long)]
+        force: bool,
+    },
+
     /// Import dependencies from an existing environment or lock file.
     Import {
         /// requirements.txt, renv.lock, env.lock, uv.lock, or environment.yml.

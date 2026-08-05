@@ -97,6 +97,10 @@ When `dual add` or `dual import` introduces a dependency for an omitted
 language, Dual adds the missing section. It uses R 4.5 or Python 3.12 by default
 unless an imported file specifies a runtime version.
 
+`dual enable` and `dual disable` explicitly manage the same optional sections.
+They update `dual.toml` but leave the generated environment and `dual.lock`
+untouched until `dual up --refresh` is run.
+
 R packages are normalized internally as source-qualified references such as `cran::dplyr`, `bioc::DESeq2`, and `github::r-lib/pak@v0.9.0`. Python dependencies are validated as simple package requirements and direct URLs or environment markers are rejected.
 
 Task dependencies are resolved before execution. Dependency cycles are rejected.
@@ -281,6 +285,79 @@ Removes matching entries from `dual.toml` and reports how many were removed.
 ```console
 dual remove py pandas
 dual remove r bioc::DESeq2
+```
+
+### `dual enable`
+
+#### Name
+
+`dual-enable`
+
+#### Usage
+
+```console
+dual enable r [--version VERSION]
+dual enable py [--version VERSION]
+```
+
+#### Arguments
+
+`r`, `py`: Runtime to enable. `python` is accepted as an alias for `py`.
+
+`--version VERSION`: Runtime version to request. An omitted runtime defaults to
+R 4.5 or Python 3.12. For an enabled runtime, omitting this option preserves the
+current version.
+
+#### Value
+
+Adds the missing runtime section or updates its version. Existing packages,
+indexes, tasks, generated state, and `dual.lock` are preserved. Repeating the
+same request is a no-op.
+
+#### Examples
+
+```console
+dual enable r
+dual enable py --version 3.13
+dual up --refresh
+```
+
+### `dual disable`
+
+#### Name
+
+`dual-disable`
+
+#### Usage
+
+```console
+dual disable r [--force]
+dual disable py [--force]
+```
+
+#### Arguments
+
+`r`, `py`: Runtime to disable. `python` is accepted as an alias for `py`.
+
+`--force`: Remove packages and Python indexes configured within the disabled
+runtime section.
+
+#### Value
+
+Removes the runtime section. Without `--force`, configured packages or indexes
+block the operation. Tasks that invoke the runtime or reference compatible
+scripts always block it; `.qmd` task targets conservatively block either runtime
+because they can execute both. Removing the last runtime from a project without
+Quarto enabled is also blocked. An already omitted runtime is a no-op. Generated
+state and `dual.lock` remain unchanged until `dual up --refresh` applies the
+transition.
+
+#### Examples
+
+```console
+dual disable r
+dual disable py --force
+dual up --refresh
 ```
 
 ### `dual import`
@@ -607,6 +684,12 @@ let config = Config::load(&root)?;
 
 `EffectiveConfig`: Merged project and inline script configuration.
 
+`EnableLanguageResult`: Whether enablement changed the file, plus the previous
+and selected runtime versions.
+
+`DisableLanguageResult`: Whether disablement changed the file, plus removed
+package and index counts.
+
 `MetadataSource`: Source label for effective script configuration.
 
 `PythonRequirement`: Parsed Python requirement with `name`, `extras`, and `version`.
@@ -634,6 +717,12 @@ let config = Config::load(&root)?;
 `Config::add_packages(path, section, packages)`: Add packages to `dual.toml`.
 
 `Config::remove_packages(path, section, packages)`: Remove packages from `dual.toml`.
+
+`Config::enable_language(path, section, version)`: Add a missing R or Python
+section or update its runtime version after validating the prospective config.
+
+`Config::disable_language(path, section, force)`: Safely remove an R or Python
+section, enforcing dependency, task, and last-runtime guards.
 
 `starter_config(project_name, python, r)`: Render and validate a new mixed- or single-language project configuration.
 

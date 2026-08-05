@@ -93,6 +93,14 @@ fn run() -> Result<()> {
             let root = Config::find_root(&current)?;
             remove(&root, language, &packages)
         }
+        Commands::Enable { language, version } => {
+            let root = Config::find_root(&current)?;
+            enable(&root, language, version.as_deref())
+        }
+        Commands::Disable { language, force } => {
+            let root = Config::find_root(&current)?;
+            disable(&root, language, force)
+        }
         Commands::Import { file } => {
             let root = Config::find_root(&current)?;
             import(&root, &file, json)
@@ -283,6 +291,72 @@ fn remove(root: &std::path::Path, language: Language, packages: &[String]) -> Re
         println!("Run `dual up --refresh` to update the shared environment lock.");
     }
     Ok(())
+}
+
+fn enable(root: &std::path::Path, language: Language, version: Option<&str>) -> Result<()> {
+    let path = Config::path(root);
+    security::reject_symlink_if_present(&path, "dual.toml")?;
+    let preserve_trust = security::project_is_trusted(root)?;
+    let (section, label) = language_details(language);
+    let result = Config::enable_language(&path, section, version)?;
+    if result.changed && preserve_trust {
+        security::refresh_project_trust(root)?;
+    }
+
+    if result.changed {
+        if let Some(previous) = result.previous_version {
+            println!(
+                "Updated {label} from {previous} to {} in dual.toml.",
+                result.version
+            );
+        } else {
+            println!("Enabled {label} {} in dual.toml.", result.version);
+        }
+        print_environment_update_next(root);
+    } else {
+        println!("{label} is already enabled at version {}.", result.version);
+    }
+    Ok(())
+}
+
+fn disable(root: &std::path::Path, language: Language, force: bool) -> Result<()> {
+    let path = Config::path(root);
+    security::reject_symlink_if_present(&path, "dual.toml")?;
+    let preserve_trust = security::project_is_trusted(root)?;
+    let (section, label) = language_details(language);
+    let result = Config::disable_language(&path, section, force)?;
+    if result.changed && preserve_trust {
+        security::refresh_project_trust(root)?;
+    }
+
+    if !result.changed {
+        println!("{label} is already disabled.");
+        return Ok(());
+    }
+    println!("Disabled {label} in dual.toml.");
+    if result.removed_packages > 0 || result.removed_indexes > 0 {
+        println!(
+            "Removed {} package(s) and {} package index(es).",
+            result.removed_packages, result.removed_indexes
+        );
+    }
+    print_environment_update_next(root);
+    Ok(())
+}
+
+fn language_details(language: Language) -> (&'static str, &'static str) {
+    match language {
+        Language::R => ("r", "R"),
+        Language::Py => ("python", "Python"),
+    }
+}
+
+fn print_environment_update_next(root: &std::path::Path) {
+    if root.join("dual.lock").is_file() {
+        println!("Run `dual up --refresh` to update the shared environment lock.");
+    } else {
+        println!("Run `dual up` to create the project environment.");
+    }
 }
 
 fn init(

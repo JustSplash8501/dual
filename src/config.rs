@@ -53,6 +53,20 @@ pub struct Config {
     pub tasks: BTreeMap<String, TaskConfig>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EnableLanguageResult {
+    pub changed: bool,
+    pub previous_version: Option<String>,
+    pub version: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DisableLanguageResult {
+    pub changed: bool,
+    pub removed_packages: usize,
+    pub removed_indexes: usize,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectConfig {
@@ -512,6 +526,172 @@ impl Config {
         security::write_file_atomic(path, document.to_string().as_bytes(), "dual.toml")?;
         Self::from_path(path)?;
         Ok(removed)
+    }
+
+    pub fn enable_language(
+        path: &Path,
+        section: &str,
+        version: Option<&str>,
+    ) -> Result<EnableLanguageResult> {
+        let current = Self::from_path(path)?;
+        let previous_version = language_version(&current, section)?;
+        let contents = security::read_text_file(path, MAX_CONFIG_BYTES, "dual.toml")?;
+        let mut document = contents
+            .parse::<DocumentMut>()
+            .map_err(|error| DualError::InvalidConfig(error.to_string()))?;
+        let was_present = document.contains_key(section);
+        ensure_language_table(&mut document, section)?;
+
+        let table = document[section]
+            .as_table_mut()
+            .expect("language section was created as a table");
+        let selected_version = version
+            .map(str::to_owned)
+            .or_else(|| {
+                table
+                    .get("version")
+                    .and_then(Item::as_str)
+                    .map(str::to_owned)
+            })
+            .expect("language sections always contain a version");
+        let version_changed =
+            table.get("version").and_then(Item::as_str) != Some(selected_version.as_str());
+        if version_changed {
+            table.insert("version", toml_edit::value(&selected_version));
+        }
+
+        let changed = !was_present || version_changed;
+        validate_document(&document)?;
+        if changed {
+            security::write_file_atomic(path, document.to_string().as_bytes(), "dual.toml")?;
+        }
+        Ok(EnableLanguageResult {
+            changed,
+            previous_version,
+            version: selected_version,
+        })
+    }
+
+    pub fn disable_language(
+        path: &Path,
+        section: &str,
+        force: bool,
+    ) -> Result<DisableLanguageResult> {
+        let current = Self::from_path(path)?;
+        if language_version(&current, section)?.is_none() {
+            return Ok(DisableLanguageResult {
+                changed: false,
+                removed_packages: 0,
+                removed_indexes: 0,
+            });
+        }
+
+        let task_references = current
+            .tasks
+            .iter()
+            .filter(|(_, task)| task_references_language(task.command(), section))
+            .map(|(name, _)| name.clone())
+            .collect::<Vec<_>>();
+        if !task_references.is_empty() {
+            anyhow::bail!(
+                "cannot disable {} while tasks directly reference it: {}. Update those tasks first.",
+                language_label(section)?,
+                task_references.join(", ")
+            );
+        }
+
+        let disabling_last_runtime = match section {
+            "r" => !current.python.enabled,
+            "python" => !current.r.enabled,
+            _ => unreachable!("language_version validates the section"),
+        };
+        if disabling_last_runtime && !current.quarto.enabled {
+            anyhow::bail!("cannot disable the last project runtime unless Quarto is enabled");
+        }
+
+        let (removed_packages, removed_indexes) = match section {
+            "r" => (current.r.packages.len(), 0),
+            "python" => (current.python.packages.len(), current.python.index.len()),
+            _ => unreachable!("language_version validates the section"),
+        };
+        if !force && (removed_packages > 0 || removed_indexes > 0) {
+            anyhow::bail!(
+                "disabling {} would remove {} package(s) and {} package index(es). Remove them first or rerun with `--force`.",
+                language_label(section)?,
+                removed_packages,
+                removed_indexes
+            );
+        }
+
+        let contents = security::read_text_file(path, MAX_CONFIG_BYTES, "dual.toml")?;
+        let mut document = contents
+            .parse::<DocumentMut>()
+            .map_err(|error| DualError::InvalidConfig(error.to_string()))?;
+        document.remove(section);
+        validate_document(&document)?;
+        security::write_file_atomic(path, document.to_string().as_bytes(), "dual.toml")?;
+        Ok(DisableLanguageResult {
+            changed: true,
+            removed_packages,
+            removed_indexes,
+        })
+    }
+}
+
+fn validate_document(document: &DocumentMut) -> Result<Config> {
+    let config: Config = toml::from_str(&document.to_string())
+        .map_err(|error| DualError::InvalidConfig(error.to_string()))?;
+    config.validate()?;
+    Ok(config)
+}
+
+fn language_version(config: &Config, section: &str) -> Result<Option<String>> {
+    match section {
+        "r" => Ok(config.r.enabled.then(|| config.r.version.clone())),
+        "python" => Ok(config.python.enabled.then(|| config.python.version.clone())),
+        _ => Err(DualError::InvalidConfig(format!("unknown language section: {section}")).into()),
+    }
+}
+
+fn language_label(section: &str) -> Result<&'static str> {
+    match section {
+        "r" => Ok("R"),
+        "python" => Ok("Python"),
+        _ => Err(DualError::InvalidConfig(format!("unknown language section: {section}")).into()),
+    }
+}
+
+fn task_references_language(command: &str, section: &str) -> bool {
+    let executable = command
+        .split_whitespace()
+        .next()
+        .map(|part| part.trim_matches(['\'', '"']))
+        .and_then(|part| Path::new(part).file_name())
+        .and_then(|part| part.to_str())
+        .map(|part| part.trim_end_matches(".exe").to_ascii_lowercase());
+    let executable_matches = match (section, executable.as_deref()) {
+        ("r", Some("r" | "rscript")) => true,
+        ("python", Some("py" | "python" | "python3" | "pythonw")) => true,
+        ("python", Some(executable)) => executable.strip_prefix("python").is_some_and(|suffix| {
+            suffix
+                .chars()
+                .next()
+                .is_some_and(|character| character.is_ascii_digit())
+        }),
+        _ => false,
+    };
+    if executable_matches {
+        return true;
+    }
+
+    let Some(script) = crate::platform::referenced_script(command) else {
+        return false;
+    };
+    let script = script.to_string_lossy().to_ascii_lowercase();
+    match section {
+        "r" => script.ends_with(".r") || script.ends_with(".rmd") || script.ends_with(".qmd"),
+        "python" => script.ends_with(".py") || script.ends_with(".qmd"),
+        _ => false,
     }
 }
 
@@ -998,6 +1178,135 @@ enabled = true
         );
 
         assert!(starter_config("invalid", Some("3.12;bad"), None).is_err());
+    }
+
+    #[test]
+    fn enable_language_adds_defaults_and_updates_versions_without_losing_packages() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("dual.toml");
+        fs::write(
+            &path,
+            starter_config("python-only", Some("3.13"), None).unwrap(),
+        )
+        .unwrap();
+
+        let enabled = Config::enable_language(&path, "r", None).unwrap();
+        assert!(enabled.changed);
+        assert_eq!(enabled.previous_version, None);
+        assert_eq!(enabled.version, DEFAULT_R_VERSION);
+        let config = Config::from_path(&path).unwrap();
+        assert!(config.r.enabled);
+        assert!(config.python.enabled);
+
+        Config::add_packages(&path, "r", &["dplyr".into()]).unwrap();
+        let updated = Config::enable_language(&path, "r", Some("4.4")).unwrap();
+        assert!(updated.changed);
+        assert_eq!(updated.previous_version.as_deref(), Some(DEFAULT_R_VERSION));
+        assert_eq!(updated.version, "4.4");
+        let config = Config::from_path(&path).unwrap();
+        assert_eq!(config.r.version, "4.4");
+        assert_eq!(config.r.packages, ["dplyr"]);
+
+        let unchanged = Config::enable_language(&path, "r", None).unwrap();
+        assert!(!unchanged.changed);
+        assert_eq!(unchanged.version, "4.4");
+    }
+
+    #[test]
+    fn invalid_enable_version_does_not_modify_config() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("dual.toml");
+        fs::write(
+            &path,
+            starter_config("python-only", Some("3.12"), None).unwrap(),
+        )
+        .unwrap();
+        let before = fs::read_to_string(&path).unwrap();
+
+        assert!(Config::enable_language(&path, "r", Some("4.5;bad")).is_err());
+        assert_eq!(fs::read_to_string(path).unwrap(), before);
+    }
+
+    #[test]
+    fn disable_language_is_safe_and_force_removes_dependencies() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("dual.toml");
+        fs::write(&path, DEFAULT_CONFIG).unwrap();
+        Config::add_packages(&path, "python", &["pandas".into()]).unwrap();
+
+        let before = fs::read_to_string(&path).unwrap();
+        let error = Config::disable_language(&path, "python", false)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("--force"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), before);
+
+        let disabled = Config::disable_language(&path, "python", true).unwrap();
+        assert!(disabled.changed);
+        assert_eq!(disabled.removed_packages, 1);
+        assert_eq!(disabled.removed_indexes, 0);
+        let config = Config::from_path(&path).unwrap();
+        assert!(!config.python.enabled);
+        assert!(config.r.enabled);
+
+        let unchanged = Config::disable_language(&path, "python", false).unwrap();
+        assert!(!unchanged.changed);
+    }
+
+    #[test]
+    fn disable_language_blocks_referenced_tasks_even_with_force() {
+        for (section, command) in [
+            ("r", "Rscript analysis.R"),
+            ("python", "python3.13 scripts/model.py"),
+            ("r", "quarto render report.qmd"),
+            ("python", "quarto render report.qmd"),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("dual.toml");
+            fs::write(
+                &path,
+                DEFAULT_CONFIG.replace("[tasks]\n", &format!("[tasks]\nanalysis = {command:?}\n")),
+            )
+            .unwrap();
+            let before = fs::read_to_string(&path).unwrap();
+
+            let error = Config::disable_language(&path, section, true)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("analysis"));
+            assert_eq!(fs::read_to_string(&path).unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn disable_language_protects_the_last_runtime_except_for_quarto_projects() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("dual.toml");
+        fs::write(
+            &path,
+            starter_config("python-only", Some("3.12"), None).unwrap(),
+        )
+        .unwrap();
+        let error = Config::disable_language(&path, "python", true)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("last project runtime"));
+
+        fs::write(
+            &path,
+            fs::read_to_string(&path)
+                .unwrap()
+                .replace("enabled = false", "enabled = true"),
+        )
+        .unwrap();
+        assert!(
+            Config::disable_language(&path, "python", false)
+                .unwrap()
+                .changed
+        );
+        let config = Config::from_path(&path).unwrap();
+        assert!(!config.python.enabled);
+        assert!(config.quarto.enabled);
     }
 
     #[test]

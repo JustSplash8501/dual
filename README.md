@@ -96,6 +96,8 @@ dual add r PACKAGE...              Add R packages
 dual add py PACKAGE...             Add Python packages
 dual remove r PACKAGE...           Remove R packages
 dual remove py PACKAGE...          Remove Python packages
+dual enable r|py [--version VER]   Add or update a project runtime
+dual disable r|py [--force]        Remove a project runtime
 dual import FILE                   Import requirements.txt, renv.lock, env.lock,
                                    uv.lock, or environment.yml
 dual up                            Create or update the environment
@@ -234,6 +236,27 @@ true`. Existing project files containing both sections continue to work
 unchanged. Adding or importing a dependency for an omitted language adds that
 language with Dual's default runtime version unless the import provides a
 version.
+
+Move between single- and mixed-language projects in place:
+
+```console
+dual enable r                       # use the default R version
+dual enable py --version 3.13       # use an explicit Python version
+dual up --refresh
+
+dual disable r
+dual up --refresh
+```
+
+Enabling an existing runtime without `--version` is a no-op; supplying a new
+version updates it without changing its packages. Disabling removes the whole
+language section. Dual refuses to disable a runtime that still has configured
+packages, Python indexes, or tasks that invoke it or reference compatible
+scripts or documents, and it refuses to remove the last runtime unless Quarto
+is enabled. `--force` removes configured packages and indexes, but does not
+override task or last-runtime protection.
+Neither command changes the existing environment or `dual.lock`; run the
+suggested `dual up --refresh` to apply the new configuration.
 
 Commands that install packages or execute project code require explicit
 repository trust on first use:

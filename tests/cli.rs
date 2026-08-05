@@ -805,6 +805,164 @@ fn remove_packages_updates_config() {
 }
 
 #[test]
+fn runtime_enable_moves_single_language_projects_to_both_and_is_idempotent() {
+    let directory = tempdir().unwrap();
+    Command::cargo_bin("dual")
+        .unwrap()
+        .current_dir(directory.path())
+        .args(["init", "python-only", "--python", "3.13"])
+        .assert()
+        .success();
+    write_test_lock(directory.path(), "existing lock");
+
+    Command::cargo_bin("dual")
+        .unwrap()
+        .current_dir(directory.path())
+        .args(["enable", "r", "--version", "4.4"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("Enabled R 4.4")
+                .and(predicate::str::contains("dual up --refresh")),
+        );
+    let config = dual::config::Config::load(directory.path()).unwrap();
+    assert!(config.python.enabled);
+    assert!(config.r.enabled);
+    assert_eq!(config.r.version, "4.4");
+
+    let before = fs::read_to_string(directory.path().join("dual.toml")).unwrap();
+    let lock_before = fs::read(directory.path().join("dual.lock")).unwrap();
+    Command::cargo_bin("dual")
+        .unwrap()
+        .current_dir(directory.path())
+        .args(["enable", "r"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "R is already enabled at version 4.4",
+        ));
+    assert_eq!(
+        fs::read_to_string(directory.path().join("dual.toml")).unwrap(),
+        before
+    );
+
+    Command::cargo_bin("dual")
+        .unwrap()
+        .current_dir(directory.path())
+        .args(["enable", "r", "--version", "4.4;bad"])
+        .assert()
+        .failure();
+    assert_eq!(
+        fs::read_to_string(directory.path().join("dual.toml")).unwrap(),
+        before
+    );
+    assert_eq!(
+        fs::read(directory.path().join("dual.lock")).unwrap(),
+        lock_before
+    );
+
+    let r_only = tempdir().unwrap();
+    Command::cargo_bin("dual")
+        .unwrap()
+        .current_dir(r_only.path())
+        .args(["init", "r-only", "--r", "4.5"])
+        .assert()
+        .success();
+    Command::cargo_bin("dual")
+        .unwrap()
+        .current_dir(r_only.path())
+        .args(["enable", "py"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Enabled Python 3.12"));
+    let config = dual::config::Config::load(r_only.path()).unwrap();
+    assert!(config.r.enabled);
+    assert!(config.python.enabled);
+}
+
+#[test]
+fn runtime_disable_requires_force_for_dependencies_and_removes_the_section() {
+    let directory = initialized_project();
+    let config_path = directory.path().join("dual.toml");
+    fs::write(
+        &config_path,
+        fs::read_to_string(&config_path).unwrap().replace(
+            "dependencies = []",
+            "dependencies = [\"pandas\"]\n\n[[python.index]]\nurl = \"https://example.com/simple\"",
+        ),
+    )
+    .unwrap();
+    let before = fs::read_to_string(&config_path).unwrap();
+
+    Command::cargo_bin("dual")
+        .unwrap()
+        .current_dir(directory.path())
+        .args(["disable", "py"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--force"));
+    assert_eq!(fs::read_to_string(&config_path).unwrap(), before);
+
+    Command::cargo_bin("dual")
+        .unwrap()
+        .current_dir(directory.path())
+        .args(["disable", "py", "--force"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("Disabled Python").and(predicate::str::contains(
+                "1 package(s) and 1 package index(es)",
+            )),
+        );
+    let config = dual::config::Config::load(directory.path()).unwrap();
+    assert!(!config.python.enabled);
+    assert!(config.r.enabled);
+
+    Command::cargo_bin("dual")
+        .unwrap()
+        .current_dir(directory.path())
+        .args(["disable", "py"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Python is already disabled"));
+}
+
+#[test]
+fn runtime_disable_blocks_tasks_and_the_last_runtime() {
+    let directory = initialized_project();
+    let config_path = directory.path().join("dual.toml");
+    fs::write(
+        &config_path,
+        fs::read_to_string(&config_path)
+            .unwrap()
+            .replace("[tasks]\n", "[tasks]\nmodel = \"python model.py\"\n"),
+    )
+    .unwrap();
+    Command::cargo_bin("dual")
+        .unwrap()
+        .current_dir(directory.path())
+        .args(["disable", "py", "--force"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("model"));
+
+    let python_only = tempdir().unwrap();
+    Command::cargo_bin("dual")
+        .unwrap()
+        .current_dir(python_only.path())
+        .args(["init", "python-only", "--python", "3.12"])
+        .assert()
+        .success();
+    Command::cargo_bin("dual")
+        .unwrap()
+        .current_dir(python_only.path())
+        .args(["disable", "py", "--force"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("last project runtime"));
+}
+
+#[test]
 fn task_list_prints_configured_tasks() {
     let directory = initialized_project();
     let path = directory.path().join("dual.toml");
@@ -997,6 +1155,44 @@ fn add_preserves_existing_trust_for_the_suggested_plain_up() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("dual up --refresh"))
+        .stderr(predicate::str::contains("project is not trusted").not());
+}
+
+#[cfg(unix)]
+#[test]
+fn runtime_lifecycle_preserves_existing_trust_for_the_suggested_refresh() {
+    let fixture = backend_fixture();
+    let home = fixture
+        .engine
+        .parent()
+        .unwrap()
+        .join("lifecycle-trust-home");
+
+    untrusted_dual_command(&fixture, &home)
+        .args(["--trust-project", "up"])
+        .assert()
+        .success();
+
+    untrusted_dual_command(&fixture, &home)
+        .args(["disable", "py"])
+        .assert()
+        .success();
+    untrusted_dual_command(&fixture, &home)
+        .env("DUAL_ENGINE_FAIL_LOCKED", "1")
+        .arg("up")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("dual up --refresh"))
+        .stderr(predicate::str::contains("project is not trusted").not());
+
+    untrusted_dual_command(&fixture, &home)
+        .args(["enable", "py"])
+        .assert()
+        .success();
+    untrusted_dual_command(&fixture, &home)
+        .args(["up", "--refresh"])
+        .assert()
+        .success()
         .stderr(predicate::str::contains("project is not trusted").not());
 }
 

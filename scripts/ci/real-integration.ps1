@@ -40,6 +40,7 @@ pycheck = 'python -c "import six; print(six.__version__)"'
 '@
 $config = $config.Replace("[tasks]", $pythonTask.Trim())
 Set-Content dual.toml $config
+'cat("R enabled")' | Set-Content scripts/enabled.R
 $pythonUp = (& $env:DUAL_BIN --trust-project up) -join "`n"
 if (-not ($pythonUp -match "Python 3.12 requested")) {
     throw "Python-only preparation did not report Python"
@@ -60,6 +61,22 @@ if (-not ($pythonManifest -match "(?m)^python = ")) {
 }
 if ($pythonManifest -match "r-base") { throw "Python-only manifest contains R" }
 
+# A single-language project must move to both runtimes and back without being
+# recreated. Existing packages and tasks in the original runtime stay usable.
+& $env:DUAL_BIN enable r --version 4.5
+& $env:DUAL_BIN up --refresh
+$enabledR = (& $env:DUAL_BIN run scripts/enabled.R) -join "`n"
+if (-not ($enabledR -match "R enabled")) { throw "Enabled R runtime did not run" }
+$pythonRun = (& $env:DUAL_BIN run pycheck) -join "`n"
+if (-not ($pythonRun -match "1.17.0")) { throw "Python task failed after enabling R" }
+$bothManifest = Get-Content ".dual/workspace/pyproject.toml" -Raw
+if (-not ($bothManifest -match "r-base")) { throw "Mixed manifest omitted R" }
+if (-not ($bothManifest -match "(?m)^python = ")) { throw "Mixed manifest omitted Python" }
+& $env:DUAL_BIN disable r
+& $env:DUAL_BIN up --refresh
+$pythonManifest = Get-Content ".dual/workspace/pyproject.toml" -Raw
+if ($pythonManifest -match "r-base") { throw "Python-only manifest retained disabled R" }
+
 $rOnly = Join-Path $env:RUNNER_TEMP "dual-r-only"
 Remove-Item -Recurse -Force $rOnly -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Path $rOnly | Out-Null
@@ -73,6 +90,7 @@ rcheck = 'Rscript -e "cat(jsonlite::toJSON(list(ok=TRUE)))"'
 '@
 $config = $config.Replace("[tasks]", $rTask.Trim())
 Set-Content dual.toml $config
+'print("Python enabled")' | Set-Content scripts/enabled.py
 $rUp = (& $env:DUAL_BIN --trust-project up) -join "`n"
 if (-not ($rUp -match "R 4.5 requested")) {
     throw "R-only preparation did not report R"
@@ -90,6 +108,20 @@ if (-not (Test-Path dual.lock)) { throw "R-only lockfile was not created" }
 $rManifest = Get-Content ".dual/workspace/pyproject.toml" -Raw
 if (-not ($rManifest -match "r-base")) { throw "R-only manifest omitted R" }
 if ($rManifest -match "(?m)^python = ") { throw "R-only manifest contains Python" }
+
+& $env:DUAL_BIN enable py --version 3.12
+& $env:DUAL_BIN up --refresh
+$enabledPython = (& $env:DUAL_BIN run scripts/enabled.py) -join "`n"
+if (-not ($enabledPython -match "Python enabled")) { throw "Enabled Python runtime did not run" }
+$rRun = (& $env:DUAL_BIN run rcheck) -join "`n"
+if (-not ($rRun -match '"ok":\[true\]')) { throw "R task failed after enabling Python" }
+$bothManifest = Get-Content ".dual/workspace/pyproject.toml" -Raw
+if (-not ($bothManifest -match "r-base")) { throw "Mixed manifest omitted R" }
+if (-not ($bothManifest -match "(?m)^python = ")) { throw "Mixed manifest omitted Python" }
+& $env:DUAL_BIN disable py
+& $env:DUAL_BIN up --refresh
+$rManifest = Get-Content ".dual/workspace/pyproject.toml" -Raw
+if ($rManifest -match "(?m)^python = ") { throw "R-only manifest retained disabled Python" }
 Set-Location $mixedRoot
 
 # Project-backed Quarto metadata must merge with dual.toml without replacing

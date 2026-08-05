@@ -41,6 +41,7 @@ path.write_text(path.read_text().replace(
     "[tasks]\npycheck = \"python -c \\\"import six; print(six.__version__)\\\"\"\n",
 ))
 PY
+printf '%s\n' 'cat("R enabled")' > scripts/enabled.R
 python_up="$("$DUAL_BIN" --trust-project up)"
 printf '%s\n' "$python_up" | grep -q "Python 3.12 requested"
 if printf '%s\n' "$python_up" | grep -q "R packages configured"; then
@@ -56,6 +57,22 @@ if grep -q 'r-base' .dual/workspace/pyproject.toml; then
     exit 1
 fi
 
+# A single-language project must move to both runtimes and back without being
+# recreated. Existing packages and tasks in the original runtime stay usable.
+"$DUAL_BIN" enable r --version 4.5
+"$DUAL_BIN" up --refresh
+"$DUAL_BIN" run scripts/enabled.R | grep -q "R enabled"
+"$DUAL_BIN" run pycheck | grep -q "1.17.0"
+grep -q 'r-base = ' .dual/workspace/pyproject.toml
+grep -q '^python = ' .dual/workspace/pyproject.toml
+"$DUAL_BIN" disable r
+"$DUAL_BIN" up --refresh
+grep -q '^python = ' .dual/workspace/pyproject.toml
+if grep -q 'r-base' .dual/workspace/pyproject.toml; then
+    echo "Python-only manifest retained disabled R" >&2
+    exit 1
+fi
+
 r_only="$(mktemp -d)"
 cd "$r_only"
 "$DUAL_BIN" init r-only --r 4.5
@@ -68,6 +85,7 @@ path.write_text(path.read_text().replace(
     "[tasks]\nrcheck = \"Rscript -e \\\"cat(jsonlite::toJSON(list(ok=TRUE)))\\\"\"\n",
 ))
 PY
+printf '%s\n' 'print("Python enabled")' > scripts/enabled.py
 r_up="$("$DUAL_BIN" --trust-project up)"
 printf '%s\n' "$r_up" | grep -q "R 4.5 requested"
 if printf '%s\n' "$r_up" | grep -q "Python packages configured"; then
@@ -80,6 +98,20 @@ test -s dual.lock
 grep -q 'r-base = ' .dual/workspace/pyproject.toml
 if grep -q '^python = ' .dual/workspace/pyproject.toml; then
     echo "R-only manifest contains Python" >&2
+    exit 1
+fi
+
+"$DUAL_BIN" enable py --version 3.12
+"$DUAL_BIN" up --refresh
+"$DUAL_BIN" run scripts/enabled.py | grep -q "Python enabled"
+"$DUAL_BIN" run rcheck | grep -q '"ok":\[true\]'
+grep -q 'r-base = ' .dual/workspace/pyproject.toml
+grep -q '^python = ' .dual/workspace/pyproject.toml
+"$DUAL_BIN" disable py
+"$DUAL_BIN" up --refresh
+grep -q 'r-base = ' .dual/workspace/pyproject.toml
+if grep -q '^python = ' .dual/workspace/pyproject.toml; then
+    echo "R-only manifest retained disabled Python" >&2
     exit 1
 fi
 cd "$mixed_root"
