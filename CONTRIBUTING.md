@@ -99,9 +99,9 @@ bash scripts/ci/docker-integration.sh
 ```
 
 This builds and executes the generated image with CRAN and PyPI dependencies
-and an explicit operating-system library. GitHub Actions also runs it weekly
-and on demand to catch upstream base-image or package changes without making
-every pull request depend on external package repositories.
+and an explicit operating-system library. GitHub Actions runs it for every pull
+request, weekly, and on demand to catch both regressions and upstream base-image
+or package changes.
 
 ## Pull requests
 

@@ -516,8 +516,9 @@ docker build \
 
 The generated image intentionally does not infer system libraries, install
 Quarto, copy `.env`, reproduce task execution, or replace a reviewed production
-container design. A scheduled CI smoke test builds a mixed R/Python export with
-CRAN and PyPI packages plus a real system-library dependency.
+container design. CI smoke testing builds a mixed R/Python export for pull
+requests and weekly with CRAN and PyPI packages plus a real system-library
+dependency.
 
 ## Cross-platform behavior
 
