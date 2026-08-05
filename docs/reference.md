@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="../logo/dual_repo_logo_avatar.png" alt="dual logo" width="72">
+</p>
+
 # dual Reference Manual
 
 **Package:** dual  

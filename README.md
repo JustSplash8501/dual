@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="logo/dual_repo_logo_avatar.png" alt="dual logo" width="120">
+</p>
+
 # dual
 
 **A simple CLI for reproducible projects that use R, Python, or both.**
