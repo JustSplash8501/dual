@@ -15,7 +15,7 @@ Thanks for helping make scientific projects easier to reproduce.
 Requirements:
 
 - Git
-- Rust 1.85 or newer
+- Rust 1.88 or newer
 
 Clone the repository and build the CLI:
 
@@ -64,6 +64,8 @@ cargo fmt --all -- --check
 cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked --all-targets --all-features
 cargo build --locked --release
+cargo deny --locked check
+cargo audit --deny warnings
 ```
 
 For changes affecting environments, locks, tasks, R/Python interoperability,
@@ -87,6 +89,19 @@ $env:DUAL_ENGINE_DISABLE_PATH_FALLBACK = "1"
 
 The integration test downloads environment components and may take several
 minutes.
+
+Docker export changes should also run the mixed-runtime container smoke test
+when Docker is available:
+
+```console
+export DUAL_BIN="$PWD/target/release/dual"
+bash scripts/ci/docker-integration.sh
+```
+
+This builds and executes the generated image with CRAN and PyPI dependencies
+and an explicit operating-system library. GitHub Actions runs it for every pull
+request, weekly, and on demand to catch both regressions and upstream base-image
+or package changes.
 
 ## Pull requests
 

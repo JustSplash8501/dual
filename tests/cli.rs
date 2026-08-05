@@ -1,8 +1,49 @@
 use std::fs;
 
 use assert_cmd::Command;
+use clap::CommandFactory;
 use predicates::prelude::*;
 use tempfile::tempdir;
+
+#[test]
+fn public_command_inventory_is_documented() {
+    fn check(command: &clap::Command, prefix: &str, readme: &str, reference: &str) {
+        let visible = command
+            .get_subcommands()
+            .filter(|subcommand| !subcommand.is_hide_set())
+            .collect::<Vec<_>>();
+        for subcommand in visible {
+            let path = if prefix.is_empty() {
+                subcommand.get_name().to_owned()
+            } else {
+                format!("{prefix} {}", subcommand.get_name())
+            };
+            if subcommand
+                .get_subcommands()
+                .any(|nested| !nested.is_hide_set())
+            {
+                check(subcommand, &path, readme, reference);
+            } else {
+                let invocation = format!("dual {path}");
+                assert!(
+                    readme.contains(&invocation),
+                    "README command inventory is missing `{invocation}`"
+                );
+                assert!(
+                    reference.contains(&format!("### `{invocation}`")),
+                    "reference manual is missing a section for `{invocation}`"
+                );
+            }
+        }
+    }
+
+    check(
+        &dual::cli::Cli::command(),
+        "",
+        include_str!("../README.md"),
+        include_str!("../docs/reference.md"),
+    );
+}
 
 #[test]
 fn init_creates_expected_files() {
@@ -390,6 +431,32 @@ fn export_commands_write_conservative_files() {
         .args(["add", "py", "pandas", "rich"])
         .assert()
         .success();
+    Command::cargo_bin("dual")
+        .unwrap()
+        .current_dir(directory.path())
+        .args([
+            "add",
+            "r",
+            "cran::targets@1.11.4",
+            "bioc::DESeq2@1.42.0",
+            "github::r-lib/pak@v0.9.0",
+        ])
+        .assert()
+        .success();
+    let config_path = directory.path().join("dual.toml");
+    fs::write(
+        &config_path,
+        fs::read_to_string(&config_path).unwrap().replace(
+            "[quarto]\n",
+            "[[python.index]]\nurl = \"https://packages.example/simple\"\n\n[quarto]\n",
+        ),
+    )
+    .unwrap();
+    fs::write(
+        directory.path().join(".dockerignore"),
+        "# application-specific rule\nprivate-data/\n",
+    )
+    .unwrap();
     for (flag, file, expected) in [
         ("--requirements", "requirements.txt", "pandas"),
         ("--renv", "renv-dependencies.R", "renv::init"),
@@ -407,12 +474,79 @@ fn export_commands_write_conservative_files() {
     }
     let dockerfile = fs::read_to_string(directory.path().join("Dockerfile")).unwrap();
     assert!(dockerfile.contains("cat > /tmp/requirements.txt"));
+    assert!(dockerfile.contains("--index-url https://packages.example/simple"));
+    assert!(dockerfile.contains("ARG DUAL_PYTHON_SERIES=3.12"));
+    assert!(dockerfile.contains("ARG DUAL_SYSTEM_PACKAGES"));
     assert!(dockerfile.contains("python3 -m venv /opt/dual-python"));
     assert!(dockerfile.contains("ENV PATH=\"/opt/dual-python/bin:${PATH}\""));
     assert!(dockerfile.contains("python -m pip install --no-cache-dir"));
-    assert!(fs::read_to_string(directory.path().join(".dockerignore"))
+    assert!(dockerfile.contains("pak::pkg_install"));
+    assert!(dockerfile.contains("'cran::targets@1.11.4'"));
+    assert!(dockerfile.contains("'bioc::DESeq2@1.42.0'"));
+    assert!(dockerfile.contains("'github::r-lib/pak@v0.9.0'"));
+    let dockerignore = fs::read_to_string(directory.path().join(".dockerignore")).unwrap();
+    assert!(dockerignore.contains("private-data/"));
+    assert!(dockerignore.contains(".dual/"));
+    assert!(dockerignore.contains(".env\n"));
+    assert!(dockerignore.contains("!.env.example"));
+    let requirements = fs::read_to_string(directory.path().join("requirements.txt")).unwrap();
+    assert!(requirements.starts_with("--index-url https://packages.example/simple\n"));
+}
+
+#[test]
+fn repeated_docker_export_does_not_duplicate_managed_ignore_rules() {
+    let directory = initialized_project();
+    for _ in 0..2 {
+        Command::cargo_bin("dual")
+            .unwrap()
+            .current_dir(directory.path())
+            .args(["export", "--dockerfile"])
+            .assert()
+            .success();
+    }
+    let dockerignore = fs::read_to_string(directory.path().join(".dockerignore")).unwrap();
+    assert_eq!(
+        dockerignore
+            .lines()
+            .filter(|line| *line == ".dual/")
+            .count(),
+        1
+    );
+    assert_eq!(
+        dockerignore.lines().filter(|line| *line == ".env").count(),
+        1
+    );
+}
+
+#[test]
+fn docker_export_rejects_ambiguous_runtime_constraints() {
+    let directory = tempdir().unwrap();
+    Command::cargo_bin("dual")
         .unwrap()
-        .contains(".dual/"));
+        .current_dir(directory.path())
+        .args(["init", "ambiguous", "--python", "3.12"])
+        .assert()
+        .success();
+    let config_path = directory.path().join("dual.toml");
+    fs::write(
+        &config_path,
+        fs::read_to_string(&config_path)
+            .unwrap()
+            .replace("version = \"3.12\"", "version = \"*\""),
+    )
+    .unwrap();
+
+    Command::cargo_bin("dual")
+        .unwrap()
+        .current_dir(directory.path())
+        .args(["export", "--dockerfile"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "cannot choose a Python image from the ambiguous version requirement",
+        ));
+    assert!(!directory.path().join("Dockerfile").exists());
+    assert!(!directory.path().join(".dockerignore").exists());
 }
 
 #[test]
@@ -429,7 +563,10 @@ fn import_reads_supported_dependency_files() {
         .args(["--json", "import", "requirements.txt"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("pandas==2.2.0"));
+        .stdout(
+            predicate::str::contains("pandas==2.2.0")
+                .and(predicate::str::contains("https://example.com/simple")),
+        );
 
     fs::write(
         directory.path().join("environment.yml"),
@@ -493,6 +630,9 @@ version = "2.0.0"
 
     let config = fs::read_to_string(directory.path().join("dual.toml")).unwrap();
     assert!(config.contains("pandas==2.2.0"));
+    assert!(config.contains("[[python.index]]"));
+    assert!(config.contains("url = \"https://pypi.org/simple\""));
+    assert!(config.contains("url = \"https://example.com/simple\""));
     assert!(config.contains("scikit-learn==1.5.0"));
     assert!(config.contains("numpy==2.0.0"));
     assert!(config.contains("dplyr@1.1.4"));
@@ -525,6 +665,14 @@ skip-caret = "^1.0"
 
 [tool.poetry.group.dev.dependencies]
 ruff = ">=0.8"
+
+[[tool.poetry.source]]
+name = "internal"
+url = "https://poetry.example/simple"
+
+[[tool.uv.index]]
+name = "research"
+url = "https://uv.example/simple"
 "#,
     )
     .unwrap();
@@ -542,6 +690,8 @@ ruff = ">=0.8"
                 .and(predicate::str::contains("pytest>=8"))
                 .and(predicate::str::contains("rich>=13"))
                 .and(predicate::str::contains("ruff>=0.8"))
+                .and(predicate::str::contains("https://poetry.example/simple"))
+                .and(predicate::str::contains("https://uv.example/simple"))
                 .and(predicate::str::contains("importlib-metadata"))
                 .and(predicate::str::contains(
                     "direct @ https://example.com/direct.whl",
@@ -556,9 +706,95 @@ ruff = ">=0.8"
     assert!(config.contains("\"pytest>=8\""));
     assert!(config.contains("\"rich>=13\""));
     assert!(config.contains("\"ruff>=0.8\""));
+    assert!(config.contains("url = \"https://poetry.example/simple\""));
+    assert!(config.contains("url = \"https://uv.example/simple\""));
     assert!(!config.contains("importlib-metadata"));
     assert!(!config.contains("direct @"));
     assert!(!config.contains("skip-caret"));
+}
+
+#[test]
+fn import_handles_hashed_requirements_dependency_groups_local_uv_and_conda_channels() {
+    let requirements = initialized_project();
+    fs::write(
+        requirements.path().join("requirements.txt"),
+        concat!(
+            "urllib3==2.5.0 \\\n",
+            "  --hash=sha256:aaaaaaaa \\\n",
+            "  --hash sha256:bbbbbbbb\n"
+        ),
+    )
+    .unwrap();
+    Command::cargo_bin("dual")
+        .unwrap()
+        .current_dir(requirements.path())
+        .args(["import", "requirements.txt"])
+        .assert()
+        .success();
+    assert!(fs::read_to_string(requirements.path().join("dual.toml"))
+        .unwrap()
+        .contains("urllib3==2.5.0"));
+
+    let pyproject = initialized_project();
+    fs::write(
+        pyproject.path().join("pyproject.toml"),
+        "[dependency-groups]\ntest = [\"pytest>=8\", { include-group = \"lint\" }]\nlint = [\"ruff>=0.12\"]\n",
+    )
+    .unwrap();
+    Command::cargo_bin("dual")
+        .unwrap()
+        .current_dir(pyproject.path())
+        .args(["--json", "import", "pyproject.toml"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("pytest>=8").and(predicate::str::contains("ruff>=0.12")));
+
+    let uv = initialized_project();
+    fs::write(
+        uv.path().join("uv.lock"),
+        r#"version = 1
+requires-python = ">=3.12"
+
+[[package]]
+name = "local-project"
+source = { editable = "." }
+
+[[package]]
+name = "requests"
+version = "2.32.4"
+source = { registry = "https://pypi.org/simple" }
+"#,
+    )
+    .unwrap();
+    Command::cargo_bin("dual")
+        .unwrap()
+        .current_dir(uv.path())
+        .args(["--json", "import", "uv.lock"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("requests==2.32.4")
+                .and(predicate::str::contains("local-project (local uv package)")),
+        );
+    let uv_config = fs::read_to_string(uv.path().join("dual.toml")).unwrap();
+    assert!(uv_config.contains("requests==2.32.4"));
+    assert!(!uv_config.contains("local-project"));
+
+    let conda = initialized_project();
+    fs::write(
+        conda.path().join("environment.yml"),
+        "dependencies:\n  - conda-forge::python=3.12\n  - conda-forge::r-base=4.5\n  - conda-forge::r-curl=6.4.0\n",
+    )
+    .unwrap();
+    Command::cargo_bin("dual")
+        .unwrap()
+        .current_dir(conda.path())
+        .args(["import", "environment.yml"])
+        .assert()
+        .success();
+    let conda_config = fs::read_to_string(conda.path().join("dual.toml")).unwrap();
+    assert!(conda_config.contains("version = \"3.12\""));
+    assert!(conda_config.contains("curl@6.4.0"));
 }
 
 #[test]
@@ -1573,6 +1809,22 @@ fn up_enforces_an_existing_shared_lockfile() {
         .path()
         .join(".dual/workspace/pixi.lock")
         .exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn project_sync_enforces_an_existing_shared_lockfile() {
+    let fixture = backend_fixture();
+    write_test_lock(fixture.project.path(), "shared lock");
+
+    dual_command(&fixture).arg("sync").assert().success();
+
+    let log = fs::read_to_string(&fixture.log).unwrap();
+    let install = log
+        .lines()
+        .find(|line| line.starts_with("install "))
+        .unwrap();
+    assert!(install.contains("--locked"));
 }
 
 #[cfg(unix)]

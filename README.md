@@ -111,7 +111,7 @@ dual run FILE                      Run a .py, .R, .qmd, or .Rmd file
 dual sync [--script FILE]          Prepare dependencies without running code
 dual deps [--script FILE]          Show effective dependencies
 dual export --requirements         Write requirements.txt
-dual export --renv                 Write an renv dependency helper
+dual export --renv                 Write a renv dependency helper
 dual export --dockerfile           Write a Dockerfile and .dockerignore
 dual task list                     List configured tasks
 dual task suggest                  Suggest common tasks from project files
@@ -121,9 +121,8 @@ dual clean [--yes]                 Remove dual-generated environment files
 dual lock migrate                  Upgrade dual.lock to the current format
 ```
 
-Inspection commands such as `dual deps`, `dual task list`, `dual task suggest`,
-`dual doctor`, and `dual import FILE` accept `--json` for machine-readable
-output.
+Commands including `dual deps`, `dual task list`, `dual task suggest`, `dual
+doctor`, and `dual import FILE` accept `--json` for machine-readable output.
 
 Tasks can be simple command strings or dependency-aware tables:
 
@@ -156,7 +155,16 @@ dual import env.lock
 
 Imports add the dependencies Dual can model today and report skipped entries
 such as unsupported conda packages, Python environment markers, direct URL
-requirements, or Poetry constraints that do not map cleanly to PEP 508.
+requirements, local/editable uv packages, or Poetry constraints that do not
+map cleanly to PEP 508. PEP 621 dependencies, optional dependency groups,
+standard dependency groups, Poetry dependency tables, hashed requirements,
+channel-qualified conda packages, and pip entries inside `environment.yml` are
+recognized. Pip index directives plus uv and Poetry index tables are imported
+into `[[python.index]]`. Requirement hashes are intentionally omitted because
+Dual resolves and records its own shared lock. Keep credentials out of index
+URLs—Dual rejects embedded URL credentials and preserves PyPI as the primary
+index when importing only `--extra-index-url`. Supply private-index
+authentication through the invoking environment.
 
 Dual can also discover common test files and suggest task entries without
 editing `dual.toml`:
@@ -374,7 +382,7 @@ attestations.
 
 ### Build from source
 
-[Rust](https://rustup.rs) 1.85 or newer is required only when building from
+[Rust](https://rustup.rs) 1.88 or newer is required only when building from
 source.
 
 ```console
@@ -453,6 +461,69 @@ package caches may remain available for the next attempt.
 `dual clean` removes only `.dual/`. It deliberately preserves `dual.lock`,
 `dual.toml`, scripts, data, results, and other user files.
 
+## Compatibility contract
+
+The following files and behaviors are public contracts:
+
+- `dual.toml` is strict TOML. Documented fields, legacy R and Python `packages`
+  aliases, optional `[r]`/`[python]` sections, and string or detailed task
+  forms are supported. Unknown fields are rejected so misspellings cannot
+  silently change an environment.
+- `dual.lock` is a Dual-owned, versioned JSON file. Lock format version 1 and
+  its legacy `pixi` field spelling remain readable; `dual lock migrate` rewrites
+  the legacy spelling. The `environment` payload is opaque and must not be
+  edited by hand. A newer unsupported lock version fails safely instead of
+  being guessed.
+- Inline script metadata is strict TOML inside the documented comment markers.
+  Python uses the PEP 723 fields Dual supports; R and mixed documents use the
+  documented Dual extensions. Unknown fields and cross-language fields in a
+  single-language script are rejected.
+- Project-root `.env` is local execution input, not dependency configuration.
+  Its values never enter `dual.lock`, generated manifests, dependency exports,
+  or Docker build contexts. Commit `.env.example`, not `.env`.
+- Plain `dual up` and project `dual sync` enforce an existing `dual.lock` and
+  create one when absent. Only `dual up --refresh` intentionally re-resolves a
+  project and updates the shared lock. Script sync prepares the script-specific
+  effective environment.
+
+Commit `dual.toml` and `dual.lock` together after an intentional refresh. Keep
+`.dual/` and `.env` local.
+
+## Docker export
+
+`dual export --dockerfile` rewrites the generated `Dockerfile` but preserves
+existing `.dockerignore` content and appends any missing safety rules. It also
+excludes `.env`, `.env.*`, `.dual/`, Git metadata, Rust build output, and
+`results/`; `.env.example` remains available to the build context.
+
+Python-only exports use the configured Python version as the official Python
+image tag. R and mixed exports use the configured `rocker/r-ver` tag. In a
+mixed export, the R image's distribution supplies Python; the build verifies
+that its major/minor series matches `python.version` and fails with a direct
+explanation if it does not. Configured Python indexes are written to both
+`requirements.txt` and the Docker installation input.
+
+Docker image selection needs an exact version or a usable lower bound such as
+`>=3.12`. Wildcards, upper-bound-only constraints, and strict greater-than
+constraints are rejected because they do not identify a safe base-image tag.
+
+R packages are installed through `pak`, so CRAN, Bioconductor, GitHub, aliases,
+and supported version pins keep their `dual.toml` meaning. Native R and Python
+packages can require operating-system development libraries. Supply them
+without rewriting the generated install layer:
+
+```console
+docker build \
+  --build-arg DUAL_SYSTEM_PACKAGES="libcurl4-openssl-dev libssl-dev libxml2-dev" \
+  .
+```
+
+The generated image intentionally does not infer system libraries, install
+Quarto, copy `.env`, reproduce task execution, or replace a reviewed production
+container design. CI smoke testing builds a mixed R/Python export for pull
+requests and weekly with CRAN and PyPI packages plus a real system-library
+dependency.
+
 ## Cross-platform behavior
 
 The CLI targets Linux, macOS Intel, macOS Apple Silicon, and Windows 10/11.
@@ -475,11 +546,9 @@ banner. This allows tools such as `renv` to continue activating normally.
 
 ## Scope
 
-The MVP deliberately has no GUI, editor integration, or SLURM support.
-Quarto and R Markdown files can be run directly. Docker export writes a
-reviewable starting point with a language-appropriate base image, inline
-Python/R dependency installation, and a `.dockerignore` that excludes generated
-Dual state. It is still not a complete container build system. The goal is a
+The MVP deliberately has no GUI, editor integration, or SLURM support. Quarto
+and R Markdown files can be run directly. Docker export remains a reviewable
+starting point rather than a complete container build system. The goal is a
 small, legible foundation that makes ordinary scientific projects easy to
 reproduce.
 

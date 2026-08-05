@@ -425,7 +425,20 @@ Updates `dual.toml` with supported dependencies and prints an import report. Wit
 
 #### Details
 
-Unsupported entries, such as direct URL Python requirements, Python environment markers, Poetry constraints that do not map cleanly to PEP 508, or unmodeled conda packages, are skipped and reported.
+Unsupported entries, such as direct URL Python requirements, Python environment markers, local/editable uv packages, Poetry constraints that do not map cleanly to PEP 508, or unmodeled conda packages, are skipped and reported.
+
+PEP 621 dependencies and optional dependencies, standard
+`[dependency-groups]`, Poetry dependency tables, hashed requirement
+continuations, channel-qualified conda dependencies, and pip lists inside
+`environment.yml` are recognized. Pip `--index-url`/`--extra-index-url`
+directives and uv/Poetry index tables become `[[python.index]]` entries.
+Requirement hashes are not copied because Dual creates its own lock. Imports
+are additive and can include development or optional groups; review the report
+and remove dependencies that are not part of the desired Dual environment.
+When requirements specify only `--extra-index-url`, PyPI is retained as the
+primary index. Configured index URLs must include a host and cannot contain
+embedded credentials; provide private-index authentication from the invoking
+environment.
 
 #### Examples
 
@@ -534,6 +547,13 @@ dual sync [--script FILE] --dry-run
 
 Prepares dependencies without running project code.
 
+#### Details
+
+Project sync has the same lock behavior as plain `dual up`: it enforces an
+existing `dual.lock` and creates one when absent. It does not re-resolve an
+existing project lock; use `dual up --refresh` for that explicit operation.
+Script sync prepares the effective project-plus-inline script environment.
+
 ### `dual deps`
 
 #### Name
@@ -573,11 +593,13 @@ dual export --dockerfile
 
 #### Arguments
 
-`--requirements`: Write `requirements.txt`.
+`--requirements`: Write `requirements.txt`, including configured Python index
+directives before package requirements.
 
 `--renv`: Write `renv-dependencies.R`.
 
-`--dockerfile`: Write `Dockerfile` and `.dockerignore`.
+`--dockerfile`: Write `Dockerfile` and extend `.dockerignore` with missing
+safety rules.
 
 #### Value
 
@@ -586,6 +608,22 @@ Returns the path of the written file and writes the selected export artifact.
 #### Details
 
 Exports are compatibility helpers and should be reviewed before production use.
+The selected requirements, renv helper, or Dockerfile is replaced on each
+explicit export. Docker export preserves existing `.dockerignore` lines and
+adds missing exclusions for `.dual/`, Git and Rust build state, results, and
+local `.env` files; `.env.example` is not excluded.
+
+Python-only Docker exports use the configured Python version as an official
+Python image tag. R and mixed exports use the configured `rocker/r-ver` image.
+For mixed projects, the distribution Python installed into the R image must
+match the configured Python major/minor series or the generated build fails.
+Image selection requires an exact version or usable lower bound; wildcard,
+upper-bound-only, and strict greater-than constraints are rejected as
+ambiguous. R package references are installed through `pak` so supported
+sources and version pins retain their configuration meaning.
+Use the `DUAL_SYSTEM_PACKAGES` Docker build argument for native package system
+libraries. Quarto installation, private-index credentials, application entry
+points, and production hardening remain explicit user responsibilities.
 
 ### `dual task list`
 
@@ -692,11 +730,11 @@ dual engine uninstall
 
 `update` downloads and activates the pinned environment engine. `uninstall` removes the private engine installation and reports whether anything was removed.
 
-### `dual lock`
+### `dual lock migrate`
 
 #### Name
 
-`dual-lock`
+`dual-lock-migrate`
 
 #### Usage
 
@@ -1104,6 +1142,27 @@ not already defined by the invoking environment or command.
 `renv-dependencies.R`: R export helper target.
 
 `Dockerfile` and `.dockerignore`: Docker export targets.
+
+## Compatibility Contract
+
+`dual.toml` and inline metadata reject unknown fields. This is intentional:
+misspelled configuration must fail rather than silently produce a different
+environment. The documented fields and aliases are the supported public
+surface.
+
+`dual.lock` is versioned independently inside the file. Format version 1 is the
+current public lock contract. The legacy top-level `pixi` spelling is accepted
+and can be rewritten with `dual lock migrate`; the neutral `environment`
+payload is opaque. Unsupported future versions fail with an instruction to
+refresh or upgrade rather than being interpreted approximately.
+
+Project-root `.env` values are trusted execution inputs only. They are not
+written to locks, generated environment manifests, requirements or renv
+exports, and Docker export excludes them from the build context.
+
+Plain `dual up` and project `dual sync` preserve an existing shared resolution.
+`dual up --refresh` is the sole project command that intentionally re-resolves
+and updates `dual.lock`.
 
 ## Safety Notes
 

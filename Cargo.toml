@@ -2,7 +2,7 @@
 name = "dual"
 version = "0.1.1"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.88"
 description = "A simple CLI for reproducible projects that use R, Python, or both"
 license = "MIT"
 readme = "README.md"
