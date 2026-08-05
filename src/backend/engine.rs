@@ -2480,6 +2480,28 @@ cran = ["dplyr"]
     }
 
     #[test]
+    fn rejects_unknown_fields_and_future_lock_versions() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("dual.lock");
+
+        fs::write(
+            &path,
+            r#"{"version":1,"environment":"lock","mystery":true}"#,
+        )
+        .unwrap();
+        assert!(read_dual_lock(&path)
+            .unwrap_err()
+            .to_string()
+            .contains("not a supported dual lockfile"));
+
+        fs::write(&path, r#"{"version":2,"environment":"lock"}"#).unwrap();
+        assert!(read_dual_lock(&path)
+            .unwrap_err()
+            .to_string()
+            .contains("unsupported lockfile version"));
+    }
+
+    #[test]
     fn removes_private_engine_marker_names() {
         let directory = tempfile::tempdir().unwrap();
         let metadata = directory.path().join("env/conda-meta");

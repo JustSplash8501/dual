@@ -15,7 +15,7 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub verbose: bool,
 
-    /// Trust the current dual.toml and dual.lock to install packages or execute code.
+    /// Trust the current project contents to install packages or execute code.
     #[arg(long, global = true)]
     pub trust_project: bool,
 
@@ -152,7 +152,7 @@ pub enum Commands {
         dry_run: bool,
     },
 
-    /// Prepare project or script dependencies without running code.
+    /// Prepare dependencies without running code; preserve an existing project lock.
     Sync {
         /// Read inline metadata from this script or document.
         #[arg(long, value_name = "FILE")]
@@ -178,7 +178,7 @@ pub enum Commands {
             .args(["requirements", "renv", "dockerfile"])
     ))]
     Export {
-        /// Write Python dependencies to requirements.txt.
+        /// Write Python indexes and dependencies to requirements.txt.
         #[arg(long)]
         requirements: bool,
 
@@ -186,7 +186,7 @@ pub enum Commands {
         #[arg(long)]
         renv: bool,
 
-        /// Write a Dockerfile for the configured project.
+        /// Write Dockerfile and extend .dockerignore with safety exclusions.
         #[arg(long)]
         dockerfile: bool,
     },

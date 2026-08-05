@@ -12,6 +12,8 @@ use crate::security::{self, MAX_CONFIG_BYTES};
 pub struct ImportReport {
     pub source: String,
     pub python: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub python_indexes: Vec<String>,
     pub r: Vec<String>,
     pub python_version: Option<String>,
     pub r_version: Option<String>,
@@ -21,6 +23,7 @@ pub struct ImportReport {
 impl ImportReport {
     fn is_empty(&self) -> bool {
         self.python.is_empty()
+            && self.python_indexes.is_empty()
             && self.r.is_empty()
             && self.python_version.is_none()
             && self.r_version.is_none()
@@ -30,6 +33,7 @@ impl ImportReport {
 #[derive(Clone, Debug, Default)]
 struct ImportData {
     python: Vec<String>,
+    python_indexes: Vec<String>,
     r: Vec<String>,
     python_version: Option<String>,
     r_version: Option<String>,
@@ -96,6 +100,7 @@ pub fn import_file(project_root: &Path, source: &Path) -> Result<ImportReport> {
         }
     };
     deduplicate(&mut data.python);
+    deduplicate(&mut data.python_indexes);
     deduplicate(&mut data.r);
     let mut skipped = Vec::new();
     data.python.retain(|package| {
@@ -114,11 +119,20 @@ pub fn import_file(project_root: &Path, source: &Path) -> Result<ImportReport> {
             false
         }
     });
+    data.python_indexes.retain(|index| {
+        if config::validate_index_url(index).is_ok() {
+            true
+        } else {
+            skipped.push(index.clone());
+            false
+        }
+    });
     data.skipped.extend(skipped);
 
     let report = ImportReport {
         source: path.display().to_string(),
         python: data.python.clone(),
+        python_indexes: data.python_indexes.clone(),
         r: data.r.clone(),
         python_version: data.python_version.clone(),
         r_version: data.r_version.clone(),
@@ -145,6 +159,7 @@ fn apply_import(project_root: &Path, data: &ImportData) -> Result<()> {
         set_string(&mut document, "r", "version", version)?;
     }
     append_packages(&mut document, "python", "dependencies", &data.python)?;
+    append_python_indexes(&mut document, &data.python_indexes)?;
     let mut r_packages = BTreeMap::<&str, Vec<&str>>::new();
     for package in &data.r {
         let (key, value) = r_key_value(package);
@@ -159,6 +174,44 @@ fn apply_import(project_root: &Path, data: &ImportData) -> Result<()> {
         .map_err(|error| crate::errors::DualError::InvalidConfig(error.to_string()))?;
     config.validate()?;
     security::write_file_atomic(&config_path, rendered.as_bytes(), "dual.toml")?;
+    Ok(())
+}
+
+fn append_python_indexes(document: &mut toml_edit::DocumentMut, indexes: &[String]) -> Result<()> {
+    if indexes.is_empty() {
+        return Ok(());
+    }
+    config::ensure_language_table(document, "python")?;
+    let table = document
+        .get_mut("python")
+        .and_then(toml_edit::Item::as_table_mut)
+        .ok_or_else(|| crate::errors::DualError::InvalidConfig("[python] is required".into()))?;
+    if !table.contains_key("index") {
+        table.insert(
+            "index",
+            toml_edit::Item::ArrayOfTables(toml_edit::ArrayOfTables::new()),
+        );
+    }
+    let entries = table
+        .get_mut("index")
+        .and_then(toml_edit::Item::as_array_of_tables_mut)
+        .ok_or_else(|| {
+            crate::errors::DualError::InvalidConfig(
+                "array of tables expected for `python.index`".into(),
+            )
+        })?;
+    let mut seen = entries
+        .iter()
+        .filter_map(|entry| entry.get("url").and_then(toml_edit::Item::as_str))
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+    for index in indexes {
+        if seen.insert(index.clone()) {
+            let mut entry = toml_edit::Table::new();
+            entry.insert("url", toml_edit::value(index));
+            entries.push(entry);
+        }
+    }
     Ok(())
 }
 
@@ -250,23 +303,102 @@ fn r_key_value(package: &str) -> (&str, &str) {
 
 fn parse_requirements(contents: &str) -> ImportData {
     let mut data = ImportData::default();
-    for raw in contents.lines() {
+    let mut primary_index = None;
+    let mut extra_indexes = Vec::new();
+    for raw in requirement_logical_lines(contents) {
         let line = raw.trim();
         if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let uncommented = strip_inline_comment(line).trim();
+        if let Some((primary, index)) = requirement_index_url(uncommented) {
+            if primary {
+                primary_index = Some(index.to_owned());
+            } else {
+                extra_indexes.push(index.to_owned());
+            }
             continue;
         }
         if line.starts_with('-') {
             data.skipped.push(line.to_owned());
             continue;
         }
-        let requirement = strip_inline_comment(line).trim();
+        let normalized = strip_requirement_hashes(uncommented);
+        let requirement = normalized.trim();
+        if requirement.is_empty() {
+            continue;
+        }
         if requirement.contains("://") || requirement.contains(" @ ") {
             data.skipped.push(requirement.to_owned());
         } else {
             data.python.push(requirement.to_owned());
         }
     }
+    if let Some(primary) = primary_index {
+        data.python_indexes.push(primary);
+    } else if !extra_indexes.is_empty() {
+        data.python_indexes
+            .push("https://pypi.org/simple".to_owned());
+    }
+    data.python_indexes.extend(extra_indexes);
     data
+}
+
+fn requirement_index_url(line: &str) -> Option<(bool, &str)> {
+    for (option, primary) in [
+        ("--index-url", true),
+        ("--extra-index-url", false),
+        ("-i", true),
+    ] {
+        if let Some(value) = line.strip_prefix(option) {
+            if !value.is_empty() && !value.starts_with(['=', ' ', '\t']) {
+                continue;
+            }
+            let value = value.strip_prefix('=').unwrap_or(value).trim_start();
+            if !value.is_empty() {
+                return Some((primary, value));
+            }
+        }
+    }
+    None
+}
+
+fn requirement_logical_lines(contents: &str) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    for raw in contents.lines() {
+        let trimmed = raw.trim();
+        let continued = trimmed.ends_with('\\');
+        let segment = trimmed.strip_suffix('\\').unwrap_or(trimmed).trim_end();
+        if !current.is_empty() && !segment.is_empty() {
+            current.push(' ');
+        }
+        current.push_str(segment);
+        if !continued {
+            lines.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    lines
+}
+
+fn strip_requirement_hashes(value: &str) -> String {
+    let mut retained = Vec::new();
+    let mut skip_next = false;
+    for part in value.split_whitespace() {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if part == "--hash" {
+            skip_next = true;
+        } else if !part.starts_with("--hash=") {
+            retained.push(part);
+        }
+    }
+    retained.join(" ")
 }
 
 fn parse_pyproject_toml(contents: &str) -> Result<ImportData> {
@@ -317,9 +449,46 @@ fn parse_pyproject_toml(contents: &str) -> Result<ImportData> {
         {
             collect_poetry_dependency_table(&mut data, Some(dev));
         }
+        if let Some(sources) = poetry.get("source").and_then(toml::Value::as_array) {
+            collect_index_tables(&mut data, sources);
+        }
+    }
+
+    if let Some(groups) = value
+        .get("dependency-groups")
+        .and_then(toml::Value::as_table)
+    {
+        for dependencies in groups.values().filter_map(toml::Value::as_array) {
+            collect_string_array(&mut data, Some(dependencies));
+        }
+    }
+
+    if let Some(indexes) = value
+        .get("tool")
+        .and_then(toml::Value::as_table)
+        .and_then(|tool| tool.get("uv"))
+        .and_then(toml::Value::as_table)
+        .and_then(|uv| uv.get("index"))
+        .and_then(toml::Value::as_array)
+    {
+        collect_index_tables(&mut data, indexes);
     }
 
     Ok(data)
+}
+
+fn collect_index_tables(data: &mut ImportData, indexes: &[toml::Value]) {
+    for index in indexes {
+        if let Some(url) = index
+            .as_table()
+            .and_then(|index| index.get("url"))
+            .and_then(toml::Value::as_str)
+        {
+            data.python_indexes.push(url.to_owned());
+        } else {
+            data.skipped.push(format!("{index:?}"));
+        }
+    }
 }
 
 fn collect_string_array(data: &mut ImportData, values: Option<&Vec<toml::Value>>) {
@@ -479,7 +648,10 @@ fn parse_uv_lock(contents: &str) -> Result<ImportData> {
     #[derive(Deserialize)]
     struct UvPackage {
         name: String,
-        version: String,
+        #[serde(default)]
+        version: Option<String>,
+        #[serde(default)]
+        source: Option<toml::Value>,
     }
 
     let lock: UvLock = toml::from_str(contents).context("uv.lock is not valid TOML")?;
@@ -488,8 +660,21 @@ fn parse_uv_lock(contents: &str) -> Result<ImportData> {
         ..ImportData::default()
     };
     for package in lock.package {
-        data.python
-            .push(format!("{}=={}", package.name, package.version));
+        let local = package
+            .source
+            .as_ref()
+            .and_then(toml::Value::as_table)
+            .is_some_and(|source| {
+                ["editable", "virtual", "directory", "path"]
+                    .iter()
+                    .any(|key| source.contains_key(*key))
+            });
+        match (local, package.version) {
+            (false, Some(version)) => data.python.push(format!("{}=={version}", package.name)),
+            _ => data
+                .skipped
+                .push(format!("{} (local uv package)", package.name)),
+        }
     }
     Ok(data)
 }
@@ -589,12 +774,16 @@ fn collect_yaml_packages(value: &serde_yaml::Value, data: &mut ImportData) {
 }
 
 fn parse_conda_dependency(data: &mut ImportData, dependency: &str) {
-    let name = dependency
+    let unqualified = dependency
+        .rsplit_once("::")
+        .map(|(_, dependency)| dependency)
+        .unwrap_or(dependency);
+    let name = unqualified
         .split(['=', '<', '>', ' '])
         .next()
         .unwrap_or_default()
         .trim();
-    let version = dependency
+    let version = unqualified
         .split_once('=')
         .map(|(_, rest)| rest.split('=').next().unwrap_or(rest).trim())
         .filter(|value| !value.is_empty() && value.chars().next().is_some_and(char::is_numeric));

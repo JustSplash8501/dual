@@ -12,6 +12,30 @@ permissions:
   contents: read
 
 jobs:
+  security:
+    name: Dependency policy and audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
+        with:
+          toolchain: stable
+
+      - name: Install dependency security tools
+        uses: taiki-e/install-action@ace6ebe54a6a0c86dfb5f7764b17f793b6925bc3 # v2.82.3
+        with:
+          tool: cargo-audit,cargo-deny
+          fallback: none
+
+      - name: Check dependency policy
+        run: cargo deny --locked check
+
+      - name: Audit Rust dependencies
+        run: cargo audit --deny warnings
+
   quality:
     name: Format and lint
     runs-on: ubuntu-latest

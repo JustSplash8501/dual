@@ -909,11 +909,28 @@ fn validate_r(language: &RConfig) -> Result<()> {
 
 pub fn validate_index_url(url: &str) -> Result<()> {
     let value = url.trim();
-    if security::contains_control_characters(value)
-        || !(value.starts_with("https://") || value.starts_with("http://"))
-        || value.chars().any(char::is_whitespace)
-    {
+    let authority = value
+        .strip_prefix("https://")
+        .or_else(|| value.strip_prefix("http://"))
+        .and_then(|remainder| remainder.split(['/', '?', '#']).next());
+    if security::contains_control_characters(value) || value.chars().any(char::is_whitespace) {
         anyhow::bail!("package index URL must be an http:// or https:// URL without whitespace");
+    }
+    let Some(authority) = authority else {
+        anyhow::bail!("package index URL must be an http:// or https:// URL without whitespace");
+    };
+    let has_host = if authority.starts_with('[') {
+        authority
+            .find(']')
+            .is_some_and(|closing_bracket| closing_bracket > 1)
+    } else {
+        authority
+            .split(':')
+            .next()
+            .is_some_and(|host| !host.is_empty())
+    };
+    if !has_host || authority.contains('@') {
+        anyhow::bail!("package index URL must include a host and must not contain credentials");
     }
     Ok(())
 }
@@ -1089,6 +1106,15 @@ enabled = true
         assert!(config.r.packages.contains(&"bioc::DESeq2".to_owned()));
         assert!(config.r.packages.contains(&"github::hadley/emo".to_owned()));
         assert!(config.quarto.enabled);
+    }
+
+    #[test]
+    fn package_indexes_require_a_host_and_reject_embedded_credentials() {
+        assert!(validate_index_url("https://pypi.org/simple").is_ok());
+        assert!(validate_index_url("http://localhost:8080/simple").is_ok());
+        assert!(validate_index_url("https://").is_err());
+        assert!(validate_index_url("https://:8080/simple").is_err());
+        assert!(validate_index_url("https://user:secret@example.com/simple").is_err());
     }
 
     #[test]

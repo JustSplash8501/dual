@@ -617,5 +617,13 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(invalid_dependency.contains("invalid Python dependency"));
+
+        let unknown = parse(
+            "# /// script\n# requires-python = \">=3.12\"\n# mystery = true\n# ///\n",
+            ScriptKind::Python,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(unknown.contains("unknown field `mystery`"));
     }
 }

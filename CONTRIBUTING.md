@@ -64,6 +64,8 @@ cargo fmt --all -- --check
 cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked --all-targets --all-features
 cargo build --locked --release
+cargo deny --locked check
+cargo audit --deny warnings
 ```
 
 For changes affecting environments, locks, tasks, R/Python interoperability,
@@ -87,6 +89,19 @@ $env:DUAL_ENGINE_DISABLE_PATH_FALLBACK = "1"
 
 The integration test downloads environment components and may take several
 minutes.
+
+Docker export changes should also run the mixed-runtime container smoke test
+when Docker is available:
+
+```console
+export DUAL_BIN="$PWD/target/release/dual"
+bash scripts/ci/docker-integration.sh
+```
+
+This builds and executes the generated image with CRAN and PyPI dependencies
+and an explicit operating-system library. GitHub Actions also runs it weekly
+and on demand to catch upstream base-image or package changes without making
+every pull request depend on external package repositories.
 
 ## Pull requests
 

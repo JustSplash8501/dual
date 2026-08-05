@@ -1,4 +1,3 @@
-use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -8,7 +7,7 @@ use crate::backend::{Backend, EnvironmentBackend};
 use crate::config::{Config, EffectiveConfig, TaskConfig};
 use crate::metadata::ScriptKind;
 use crate::project_env::ProjectEnvironment;
-use crate::security;
+use crate::security::{self, MAX_CONFIG_BYTES};
 
 const SCRIPT_TASK: &str = "__dual_script";
 
@@ -122,7 +121,10 @@ pub fn sync_project(root: &Path, verbose: bool, trust_project: bool, dry_run: bo
         print_dependencies(&config, Some("project dual.toml"));
         return Ok(());
     }
-    sync_config(root, &config, verbose, trust_project, true)?;
+    // Project sync has the same lock semantics as plain `dual up`: an
+    // existing shared lock is enforced. Re-resolution stays an explicit
+    // `dual up --refresh` operation.
+    sync_config(root, &config, verbose, trust_project, false)?;
     println!("Project environment is ready.");
     Ok(())
 }
@@ -361,14 +363,7 @@ pub enum ExportFormat {
 pub fn export(root: &Path, format: ExportFormat) -> Result<PathBuf> {
     let config = Config::load(root)?;
     let (path, contents) = match format {
-        ExportFormat::Requirements => (
-            root.join("requirements.txt"),
-            if config.python.packages.is_empty() {
-                String::new()
-            } else {
-                config.python.packages.join("\n") + "\n"
-            },
-        ),
+        ExportFormat::Requirements => (root.join("requirements.txt"), python_requirements(&config)),
         ExportFormat::Renv => {
             let (cran, bioc, github) = grouped_r_packages(&config);
             let mut lines = vec![
@@ -400,8 +395,9 @@ pub fn export(root: &Path, format: ExportFormat) -> Result<PathBuf> {
             (root.join("renv-dependencies.R"), lines.join("\n") + "\n")
         }
         ExportFormat::Dockerfile => {
-            let python_version = docker_version(&config.python.version);
-            let r_version = docker_version(&config.r.version);
+            let python_version = docker_version(&config.python.version, "Python")?;
+            let python_series = docker_series(&python_version);
+            let r_version = docker_version(&config.r.version, "R")?;
             let base = if config.r.enabled {
                 format!("rocker/r-ver:{r_version}")
             } else if config.python.enabled {
@@ -410,40 +406,38 @@ pub fn export(root: &Path, format: ExportFormat) -> Result<PathBuf> {
                 "debian:bookworm-slim".to_owned()
             };
             let system_packages = if config.r.enabled && config.python.enabled {
-                "RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-venv git build-essential ca-certificates && rm -rf /var/lib/apt/lists/*\nRUN python3 -m venv /opt/dual-python\nENV PATH=\"/opt/dual-python/bin:${PATH}\"\n"
+                format!(
+                    "ARG DUAL_SYSTEM_PACKAGES=\"\"\nARG DUAL_PYTHON_SERIES={python_series}\nRUN apt-get update && apt-get install -y --no-install-recommends python3 python3-venv git build-essential ca-certificates $DUAL_SYSTEM_PACKAGES && rm -rf /var/lib/apt/lists/*\nRUN actual=\"$(python3 -c 'import sys; print(f\"{{sys.version_info.major}}.{{sys.version_info.minor}}\")')\" && case \"$actual\" in \"$DUAL_PYTHON_SERIES\"|\"$DUAL_PYTHON_SERIES\".*) ;; *) echo \"Configured Python $DUAL_PYTHON_SERIES is unavailable in the selected R base image (found $actual). Choose a compatible R image or install that Python version explicitly.\" >&2; exit 1 ;; esac\nRUN python3 -m venv /opt/dual-python\nENV PATH=\"/opt/dual-python/bin:${{PATH}}\"\n"
+                )
             } else {
-                "RUN apt-get update && apt-get install -y --no-install-recommends git build-essential ca-certificates && rm -rf /var/lib/apt/lists/*\n"
+                "ARG DUAL_SYSTEM_PACKAGES=\"\"\nRUN apt-get update && apt-get install -y --no-install-recommends git build-essential ca-certificates $DUAL_SYSTEM_PACKAGES && rm -rf /var/lib/apt/lists/*\n".to_owned()
             };
             let python_install = if config.python.packages.is_empty() {
                 String::new()
             } else {
                 format!(
                     "RUN <<'EOF'\ncat > /tmp/requirements.txt <<'REQ'\n{}REQ\npython -m pip install --no-cache-dir -r /tmp/requirements.txt\nEOF\n",
-                    config.python.packages.join("\n") + "\n"
+                    python_requirements(&config)
                 )
             };
-            let (cran, bioc, github) = grouped_r_packages(&config);
-            let mut r_install = String::new();
-            for package in cran {
-                push_r_install(&mut r_install, "install.packages", &package, "");
-            }
-            for package in bioc {
-                push_r_install(
-                    &mut r_install,
-                    "BiocManager::install",
-                    &package,
-                    ", ask=FALSE",
-                );
-            }
-            for package in github {
-                push_r_install(&mut r_install, "pak::pkg_install", &package, "");
-            }
-            let r_layer = if r_install.is_empty() {
+            let r_packages = config
+                .r
+                .packages
+                .iter()
+                .map(|package| {
+                    if package.contains("::") {
+                        package.clone()
+                    } else {
+                        format!("cran::{package}")
+                    }
+                })
+                .collect::<Vec<_>>();
+            let r_layer = if r_packages.is_empty() {
                 String::new()
             } else {
                 format!(
-                    "RUN Rscript -e \"options(repos=c(CRAN='https://cloud.r-project.org')); install.packages(c('pak','BiocManager')); {}\"\n",
-                    r_install
+                    "RUN Rscript -e \"options(repos=c(CRAN='https://cloud.r-project.org')); install.packages('pak'); pak::pkg_install(c({}))\"\n",
+                    r_single_values(r_packages.iter())
                 )
             };
             let quarto = if config.quarto.enabled {
@@ -451,22 +445,80 @@ pub fn export(root: &Path, format: ExportFormat) -> Result<PathBuf> {
             } else {
                 ""
             };
-            let dockerignore = ".dual/\ntarget/\n.git/\nresults/\n";
-            security::write_file_atomic(
-                &root.join(".dockerignore"),
-                dockerignore.as_bytes(),
-                ".dockerignore",
-            )?;
+            ensure_dockerignore(root)?;
             (
                 root.join("Dockerfile"),
                 format!(
-                    "# Generated by dual. Review versions and system libraries before production use.\nFROM {base}\nLABEL org.opencontainers.image.source=\"dual\"\nSHELL [\"/bin/bash\", \"-euo\", \"pipefail\", \"-c\"]\n{system_packages}WORKDIR /project\n{python_install}{r_layer}{quarto}COPY . /project\nCMD [\"bash\"]\n",
+                    "# syntax=docker/dockerfile:1\n# Generated by dual. Review versions and system libraries before production use.\n# Add OS packages required by compiled dependencies with:\n#   docker build --build-arg DUAL_SYSTEM_PACKAGES=\"libcurl4-openssl-dev libssl-dev libxml2-dev\" .\nFROM {base}\nLABEL org.opencontainers.image.source=\"dual\"\nSHELL [\"/bin/bash\", \"-euo\", \"pipefail\", \"-c\"]\n{system_packages}WORKDIR /project\n{python_install}{r_layer}{quarto}COPY . /project\nCMD [\"bash\"]\n",
                 ),
             )
         }
     };
     security::write_file_atomic(&path, contents.as_bytes(), "export file")?;
     Ok(path)
+}
+
+fn python_requirements(config: &Config) -> String {
+    let mut lines = Vec::new();
+    for (position, index) in config.python.index.iter().enumerate() {
+        let option = if position == 0 {
+            "--index-url"
+        } else {
+            "--extra-index-url"
+        };
+        lines.push(format!("{option} {}", index.url));
+    }
+    lines.extend(config.python.packages.iter().cloned());
+    if lines.is_empty() {
+        String::new()
+    } else {
+        lines.join("\n") + "\n"
+    }
+}
+
+fn ensure_dockerignore(root: &Path) -> Result<()> {
+    const REQUIRED: &[&str] = &[
+        ".dual/",
+        "target/",
+        ".git/",
+        "results/",
+        ".env",
+        ".env.*",
+        "!.env.example",
+    ];
+
+    let path = root.join(".dockerignore");
+    security::reject_symlink_if_present(&path, ".dockerignore")?;
+    let mut contents = if path.try_exists()? {
+        security::read_text_file(&path, MAX_CONFIG_BYTES, ".dockerignore")?
+    } else {
+        String::new()
+    };
+    let existing = contents
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .collect::<std::collections::BTreeSet<_>>();
+    let missing = REQUIRED
+        .iter()
+        .copied()
+        .filter(|entry| !existing.contains(entry))
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    if !contents.is_empty() && !contents.ends_with('\n') {
+        contents.push('\n');
+    }
+    if !contents.is_empty() {
+        contents.push('\n');
+    }
+    contents.push_str("# Added by dual; local environments and secrets stay outside the image.\n");
+    for entry in missing {
+        contents.push_str(entry);
+        contents.push('\n');
+    }
+    security::write_file_atomic(&path, contents.as_bytes(), ".dockerignore")
 }
 
 fn r_values(values: impl IntoIterator<Item = impl AsRef<str>>) -> String {
@@ -488,27 +540,37 @@ fn r_values(values: impl IntoIterator<Item = impl AsRef<str>>) -> String {
     rendered
 }
 
-fn push_r_install(commands: &mut String, function: &str, package: &str, extra_args: &str) {
-    if !commands.is_empty() {
-        commands.push_str("; ");
-    }
-    let _ = write!(
-        commands,
-        "{function}('{}'{extra_args})",
-        escape_single(package)
-    );
+fn r_single_values(values: impl IntoIterator<Item = impl AsRef<str>>) -> String {
+    values
+        .into_iter()
+        .map(|value| format!("'{}'", escape_single(value.as_ref())))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn escape_single(value: &str) -> String {
     value.replace('\\', "\\\\").replace('\'', "\\'")
 }
 
-fn docker_version(value: &str) -> String {
-    value
-        .trim_start_matches(['>', '=', '<', '~', '^'])
-        .split(',')
-        .next()
-        .unwrap_or(value)
-        .trim()
-        .to_owned()
+fn docker_version(value: &str, language: &str) -> Result<String> {
+    let constraint = value.split(',').next().unwrap_or(value).trim();
+    if constraint == "*"
+        || constraint.contains('*')
+        || constraint.starts_with('<')
+        || constraint.starts_with('!')
+        || (constraint.starts_with('>') && !constraint.starts_with(">="))
+    {
+        anyhow::bail!(
+            "Docker export cannot choose a {language} image from the ambiguous version requirement {value:?}; use an exact version or a lower bound such as `>=3.12`"
+        );
+    }
+    let version = constraint.trim_start_matches(['>', '=', '~', '^']).trim();
+    if version.is_empty() {
+        anyhow::bail!("Docker export cannot derive a {language} image version from {value:?}");
+    }
+    Ok(version.to_owned())
+}
+
+fn docker_series(value: &str) -> String {
+    value.split('.').take(2).collect::<Vec<_>>().join(".")
 }
