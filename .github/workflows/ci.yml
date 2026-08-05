@@ -72,7 +72,7 @@ jobs:
           - os: windows-latest
             rust: stable
           - os: ubuntu-latest
-            rust: "1.85"
+            rust: "1.88"
 
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4

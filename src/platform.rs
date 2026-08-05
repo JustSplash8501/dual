@@ -1,5 +1,17 @@
 use std::path::{Path, PathBuf};
 
+/// Render a project-relative path for durable text and machine-readable output.
+///
+/// Filesystem operations should continue using `Path`/`PathBuf` so the host OS
+/// receives native paths. This conversion is only for portable serialized
+/// representations, where `/` is the stable separator on every platform.
+pub(crate) fn portable_project_path(path: &Path) -> String {
+    path.components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 pub fn managed_paths(root: &Path) -> Vec<PathBuf> {
     vec![root.join(".dual")]
 }
@@ -28,6 +40,15 @@ mod tests {
         let paths = managed_paths(root);
         assert!(paths.iter().all(|path| path.starts_with(root)));
         assert!(!paths.contains(&root.join("dual.lock")));
+    }
+
+    #[test]
+    fn project_paths_have_portable_serialized_separators() {
+        let path = Path::new("tests").join("testthat").join("test-analysis.R");
+        assert_eq!(
+            portable_project_path(&path),
+            "tests/testthat/test-analysis.R"
+        );
     }
 
     #[test]

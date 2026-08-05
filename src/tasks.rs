@@ -7,6 +7,7 @@ use serde::Serialize;
 use crate::backend::Backend;
 use crate::config::{Config, TaskConfig};
 use crate::errors::DualError;
+use crate::platform;
 use crate::project_env::ProjectEnvironment;
 use crate::project_globs::{self, TestDiscovery};
 use crate::security;
@@ -179,12 +180,12 @@ impl TaskSuggestions {
             python_tests: discovery
                 .python
                 .into_iter()
-                .map(|path| path.display().to_string())
+                .map(|path| platform::portable_project_path(&path))
                 .collect(),
             r_tests: discovery
                 .r
                 .into_iter()
-                .map(|path| path.display().to_string())
+                .map(|path| platform::portable_project_path(&path))
                 .collect(),
             suggestions,
         }

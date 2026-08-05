@@ -378,7 +378,7 @@ attestations.
 
 ### Build from source
 
-[Rust](https://rustup.rs) 1.85 or newer is required only when building from
+[Rust](https://rustup.rs) 1.88 or newer is required only when building from
 source.
 
 ```console

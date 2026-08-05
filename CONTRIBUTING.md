@@ -15,7 +15,7 @@ Thanks for helping make scientific projects easier to reproduce.
 Requirements:
 
 - Git
-- Rust 1.85 or newer
+- Rust 1.88 or newer
 
 Clone the repository and build the CLI:
 
