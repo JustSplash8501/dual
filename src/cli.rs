@@ -122,7 +122,7 @@ pub enum Commands {
 
     /// Import dependencies from an existing environment or lock file.
     Import {
-        /// requirements.txt, renv.lock, env.lock, uv.lock, or environment.yml.
+        /// pyproject.toml, requirements.txt, renv.lock, env.lock, uv.lock, or environment.yml.
         #[arg(value_name = "FILE")]
         file: PathBuf,
     },
@@ -228,6 +228,9 @@ pub enum Commands {
 pub enum TaskCommand {
     /// List configured tasks.
     List,
+
+    /// Suggest common tasks from project files.
+    Suggest,
 }
 
 #[derive(Debug, Subcommand)]

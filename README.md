@@ -98,8 +98,8 @@ dual remove r PACKAGE...           Remove R packages
 dual remove py PACKAGE...          Remove Python packages
 dual enable r|py [--version VER]   Add or update a project runtime
 dual disable r|py [--force]        Remove a project runtime
-dual import FILE                   Import requirements.txt, renv.lock, env.lock,
-                                   uv.lock, or environment.yml
+dual import FILE                   Import pyproject.toml, requirements.txt,
+                                   renv.lock, env.lock, uv.lock, or environment.yml
 dual up                            Create or update the environment
 dual up --refresh                  Re-resolve and update the shared lockfile
 dual run TASK                      Run a configured project task
@@ -110,14 +110,16 @@ dual export --requirements         Write requirements.txt
 dual export --renv                 Write an renv dependency helper
 dual export --dockerfile           Write a Dockerfile and .dockerignore
 dual task list                     List configured tasks
+dual task suggest                  Suggest common tasks from project files
 dual shell                         Open a shell in the environment
 dual doctor                        Diagnose the project
 dual clean [--yes]                 Remove dual-generated environment files
 dual lock migrate                  Upgrade dual.lock to the current format
 ```
 
-Inspection commands such as `dual deps`, `dual task list`, `dual doctor`, and
-`dual import FILE` accept `--json` for machine-readable output.
+Inspection commands such as `dual deps`, `dual task list`, `dual task suggest`,
+`dual doctor`, and `dual import FILE` accept `--json` for machine-readable
+output.
 
 Tasks can be simple command strings or dependency-aware tables:
 
@@ -140,6 +142,7 @@ dual run analysis -- --input data.csv --limit 10
 Existing projects can be brought into Dual with:
 
 ```console
+dual import pyproject.toml
 dual import requirements.txt
 dual import renv.lock
 dual import uv.lock
@@ -148,7 +151,16 @@ dual import env.lock
 ```
 
 Imports add the dependencies Dual can model today and report skipped entries
-such as unsupported conda packages or direct URL requirements.
+such as unsupported conda packages, Python environment markers, direct URL
+requirements, or Poetry constraints that do not map cleanly to PEP 508.
+
+Dual can also discover common test files and suggest task entries without
+editing `dual.toml`:
+
+```console
+dual task suggest
+dual --json task suggest
+```
 
 ## Script workflows
 
@@ -272,6 +284,48 @@ other task inputs requires reviewing and trusting the project again. Generated
 files under `results/` do not invalidate trust. Symbolic links and special files
 are rejected in trusted projects. CI can set `DUAL_TRUST_PROJECT=1` as an
 explicit noninteractive authorization.
+
+## Project environment variables
+
+An optional `.env` at the project root supplies variables to configured tasks,
+direct script and document runs, and `dual shell`. The same file works across
+Python, R, Quarto, and R Markdown:
+
+```dotenv
+DATABASE_URL=postgres://localhost/research
+API_TOKEN="local-development-token"
+```
+
+```python
+import os
+print(os.environ["DATABASE_URL"])
+```
+
+```r
+Sys.getenv("DATABASE_URL")
+```
+
+Dual parses `.env` with `dotenvy`, including comments, quotes, multiline values,
+escapes, and variable substitution. It reads only `<project-root>/.env` and
+never searches parent directories. Values already supplied by the invoking
+environment take precedence; within `.env`, the first definition wins.
+
+Project variables are loaded only after trust verification and are attached to
+the user-facing child process without modifying Dual's own environment. They do
+not affect `dual up`, dependency installation, engine selection, trust, or
+diagnostics. In particular, private package-installation credentials must still
+be supplied by the invoking environment with `DUAL_ALLOW_CREDENTIALS=1`.
+
+Dual rejects `.env` entries that could alter its control plane, environment
+engine, executable lookup, dynamic loader, Python startup path, or R startup
+files. This includes `DUAL_*`, `PIXI_*`, `CONDA_*`, `MAMBA_*`, `RATTLER_*`,
+`PATH`, home and shell variables, `LD_*`/`DYLD_*` loader variables,
+`PYTHONHOME`, `PYTHONPATH`, `PYTHONSTARTUP`, and R home/profile/environment
+selectors, library paths, and the reticulate interpreter selector. A symlinked,
+malformed, non-UTF-8, or larger-than-1-MiB `.env` is
+also rejected. Keep `.env` out of version control by adding it to the project's
+`.gitignore`; commit a secret-free `.env.example` when collaborators need a
+template.
 
 Treat a Dual project like source code: package installation, lockfile contents,
 configured tasks, and interactive shells can execute code with your user

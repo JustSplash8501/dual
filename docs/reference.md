@@ -114,6 +114,44 @@ analysis = { cmd = "Rscript scripts/analysis.R", deps = ["prepare"] }
 report = "quarto render report.qmd"
 ```
 
+## Project Environment
+
+### Name
+
+`dual-project-environment`
+
+### Usage
+
+```dotenv
+# <project-root>/.env
+DATABASE_URL=postgres://localhost/research
+API_TOKEN="local-development-token"
+```
+
+### Details
+
+Dual parses only the `.env` file at the resolved project root. It does not
+search ancestor directories and does not modify Dual's process environment.
+Parsed values are attached to configured tasks, direct Python/R/Quarto/R
+Markdown runs, and `dual shell` after project trust is established. Python can
+read them with `os.environ`; R can read them with `Sys.getenv()`.
+
+The invoking process environment takes precedence over `.env`. Within the
+file, the first definition of a name wins. `dotenvy` syntax supports comments,
+quotes, multiline values, escapes, and variable substitution.
+
+`.env` is not loaded by environment creation, dependency installation,
+diagnostics, inspection, or trust evaluation. Reserved control-plane and
+process-injection variables are rejected, including `DUAL_*`, environment
+engine prefixes, executable/home/shell variables, dynamic-loader variables,
+Python path/startup selectors, and R home/profile/environment selectors. The
+file must be UTF-8, no larger than 1 MiB, and not a symbolic link. Its contents
+participate in the project trust fingerprint and are never printed or written
+to `dual.lock`.
+
+`.env` uses dotenv syntax and does not replace R's separate `.Renviron` startup
+format.
+
 ## Inline Script Metadata
 
 ### Name
@@ -375,7 +413,7 @@ dual --json import FILE
 
 #### Arguments
 
-`FILE`: A dependency source. Supported inputs are `requirements.txt`, `renv.lock`, `uv.lock`, `environment.yml`, `environment.yaml`, and generic `env.lock` files.
+`FILE`: A dependency source. Supported inputs are `pyproject.toml`, `requirements.txt`, `renv.lock`, `uv.lock`, `environment.yml`, `environment.yaml`, and generic `env.lock` files.
 
 #### Value
 
@@ -383,11 +421,12 @@ Updates `dual.toml` with supported dependencies and prints an import report. Wit
 
 #### Details
 
-Unsupported entries, such as direct URL Python requirements or unmodeled conda packages, are skipped and reported.
+Unsupported entries, such as direct URL Python requirements, Python environment markers, Poetry constraints that do not map cleanly to PEP 508, or unmodeled conda packages, are skipped and reported.
 
 #### Examples
 
 ```console
+dual import pyproject.toml
 dual import requirements.txt
 dual import renv.lock
 dual --json import environment.yml
@@ -454,6 +493,9 @@ dual --trust-project run FILE [--no-install] [--dry-run] [-- ARG...]
 #### Value
 
 Runs dependency tasks first for named project tasks, then runs the requested task. For script files, prepares the script environment unless `--no-install` is used, then runs the generated script task.
+
+After trust verification, values from the project-root `.env` are supplied to
+the executed task or script. They are not used while preparing dependencies.
 
 #### Examples
 
@@ -557,6 +599,23 @@ dual --json task list
 #### Value
 
 Prints configured tasks. With `--json`, prints an array of task records with `name`, `command`, and `deps`.
+
+### `dual task suggest`
+
+#### Name
+
+`dual-task-suggest`
+
+#### Usage
+
+```console
+dual task suggest
+dual --json task suggest
+```
+
+#### Value
+
+Discovers common Python and R test files and suggests task names, commands, and packages. With `--json`, prints the discovered files and suggestions.
 
 ### `dual shell`
 
@@ -1000,6 +1059,12 @@ let script = dual::platform::referenced_script("Rscript scripts/analysis.R");
 
 `platform::referenced_script(command)`: Extract a referenced script/document from a task command.
 
+`ProjectEnvironment::load(root)`: Safely parse the project-root `.env` without
+modifying the current process.
+
+`ProjectEnvironment::apply_to_command(command)`: Add project values that are
+not already defined by the invoking environment or command.
+
 ## Environment Variables
 
 `DUAL_HOME`: Override the data directory used for trust records and private engine support.
@@ -1026,6 +1091,10 @@ let script = dual::platform::referenced_script("Rscript scripts/analysis.R");
 
 `.dual/scripts/<hash>/`: Generated state for script-specific environments inside a project.
 
+`.env`: Optional local variables for tasks, scripts, documents, and `dual shell`.
+
+`.env.example`: Recommended secret-free project environment template.
+
 `requirements.txt`: Python export target.
 
 `renv-dependencies.R`: R export helper target.
@@ -1034,6 +1103,6 @@ let script = dual::platform::referenced_script("Rscript scripts/analysis.R");
 
 ## Safety Notes
 
-Package installation, task commands, lockfiles, inline metadata, and interactive shells can execute code with the current user's permissions. `dual` therefore requires project trust before installation or execution, rejects symbolic links for sensitive paths, fingerprints project files, checks for changes during execution, and removes common credential variables from package-tool subprocesses by default.
+Package installation, task commands, lockfiles, inline metadata, `.env`, and interactive shells can affect code running with the current user's permissions. `dual` therefore requires project trust before installation or execution, rejects symbolic links for sensitive paths, fingerprints project files, checks for changes during execution, reserves control-plane environment names, and removes common credential variables from package-tool subprocesses by default.
 
 Generated document outputs for Quarto and R Markdown are allowed to change during rendering, but source files are still checked after execution.

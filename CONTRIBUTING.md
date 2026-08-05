@@ -48,6 +48,8 @@ Please:
 - Keep environment updates failure-safe: do not replace ready-state metadata
   or the R/Python bridge unless installation and validation both succeed.
 - Avoid exposing internal environment-engine commands, names, or files.
+- Keep project `.env` values scoped to trusted user tasks and shells; never
+  apply them to Dual's control plane or print their values.
 - Treat Linux, macOS, and Windows as first-class platforms.
 - Add or update tests for behavior changes.
 - Update the README when commands, configuration, or installation behavior

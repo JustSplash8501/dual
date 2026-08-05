@@ -7,6 +7,7 @@ use serde::Serialize;
 use crate::backend::{Backend, EnvironmentBackend};
 use crate::config::{Config, EffectiveConfig, TaskConfig};
 use crate::metadata::ScriptKind;
+use crate::project_env::ProjectEnvironment;
 use crate::security;
 
 const SCRIPT_TASK: &str = "__dual_script";
@@ -50,6 +51,7 @@ pub fn run_script(
 
     let backend = EnvironmentBackend::for_script(&effective.root, &effective.script, verbose);
     let trust = security::ensure_project_trusted(&effective.root, trust_project)?;
+    let project_environment = ProjectEnvironment::load(&effective.root)?;
     backend.ensure_available()?;
     security::verify_project_unchanged(&effective.root, &trust)?;
     if no_install {
@@ -65,6 +67,7 @@ pub fn run_script(
         security::verify_project_unchanged(&effective.root, &trust)?;
         security::refresh_project_trust(&effective.root)?;
     }
+    security::verify_project_unchanged(&effective.root, &trust)?;
     println!("Running {}...", effective.script.display());
     let document_snapshot = matches!(effective.kind, ScriptKind::Quarto | ScriptKind::RMarkdown)
         .then(|| {
@@ -74,7 +77,7 @@ pub fn run_script(
             )
         })
         .transpose()?;
-    backend.run(&effective.config, SCRIPT_TASK, args)?;
+    backend.run_with_environment(&effective.config, SCRIPT_TASK, args, &project_environment)?;
     if let Some(snapshot) = document_snapshot {
         security::verify_project_snapshot(&effective.root, &snapshot)
     } else {

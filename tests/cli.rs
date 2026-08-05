@@ -502,6 +502,96 @@ version = "2.0.0"
 }
 
 #[test]
+fn import_reads_pyproject_dependencies() {
+    let directory = initialized_project();
+    fs::write(
+        directory.path().join("pyproject.toml"),
+        r#"[project]
+requires-python = ">=3.12"
+dependencies = [
+  "pandas>=2,<3",
+  "requests[socks]==2.32.3",
+  "importlib-metadata; python_version < '3.10'",
+  "direct @ https://example.com/direct.whl",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[tool.poetry.dependencies]
+python = ">=3.12"
+rich = ">=13"
+skip-caret = "^1.0"
+
+[tool.poetry.group.dev.dependencies]
+ruff = ">=0.8"
+"#,
+    )
+    .unwrap();
+
+    Command::cargo_bin("dual")
+        .unwrap()
+        .current_dir(directory.path())
+        .args(["--json", "import", "pyproject.toml"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("\"python_version\": \">=3.12\"")
+                .and(predicate::str::contains("pandas>=2,<3"))
+                .and(predicate::str::contains("requests[socks]==2.32.3"))
+                .and(predicate::str::contains("pytest>=8"))
+                .and(predicate::str::contains("rich>=13"))
+                .and(predicate::str::contains("ruff>=0.8"))
+                .and(predicate::str::contains("importlib-metadata"))
+                .and(predicate::str::contains(
+                    "direct @ https://example.com/direct.whl",
+                ))
+                .and(predicate::str::contains("skip-caret")),
+        );
+
+    let config = fs::read_to_string(directory.path().join("dual.toml")).unwrap();
+    assert!(config.contains("version = \">=3.12\""));
+    assert!(config.contains("\"pandas>=2,<3\""));
+    assert!(config.contains("\"requests[socks]==2.32.3\""));
+    assert!(config.contains("\"pytest>=8\""));
+    assert!(config.contains("\"rich>=13\""));
+    assert!(config.contains("\"ruff>=0.8\""));
+    assert!(!config.contains("importlib-metadata"));
+    assert!(!config.contains("direct @"));
+    assert!(!config.contains("skip-caret"));
+}
+
+#[test]
+fn import_reports_invalid_r_entries_as_skipped() {
+    let directory = initialized_project();
+    fs::write(
+        directory.path().join("renv.lock"),
+        r#"{
+  "Packages": {
+    "safe": { "Package": "safe", "Version": "1.0.0", "Source": "CRAN" },
+    "bad": { "Package": "-bad", "Version": "1.0.0", "Source": "CRAN" }
+  }
+}"#,
+    )
+    .unwrap();
+
+    Command::cargo_bin("dual")
+        .unwrap()
+        .current_dir(directory.path())
+        .args(["--json", "import", "renv.lock"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("\"cran::safe@1.0.0\"")
+                .and(predicate::str::contains("\"cran::-bad@1.0.0\"")),
+        );
+
+    let config = fs::read_to_string(directory.path().join("dual.toml")).unwrap();
+    assert!(config.contains("safe@1.0.0"));
+    assert!(!config.contains("-bad"));
+}
+
+#[test]
 fn failed_import_does_not_modify_config() {
     let directory = initialized_project();
     let config_path = directory.path().join("dual.toml");
@@ -627,6 +717,47 @@ fn commands_find_project_from_subdirectories() {
     assert!(fs::read_to_string(directory.path().join("dual.toml"))
         .unwrap()
         .contains("pandas>=2"));
+}
+
+#[test]
+fn task_suggest_discovers_python_and_r_tests() {
+    let directory = initialized_project();
+    fs::create_dir_all(directory.path().join("tests/testthat")).unwrap();
+    fs::create_dir_all(directory.path().join("target/tests")).unwrap();
+    fs::write(
+        directory.path().join("tests/test_model.py"),
+        "def test_model(): pass\n",
+    )
+    .unwrap();
+    fs::write(
+        directory.path().join("tests/testthat/test-model.R"),
+        "testthat::test_that('ok', {})\n",
+    )
+    .unwrap();
+    fs::write(directory.path().join("target/tests/test_ignored.py"), "").unwrap();
+
+    Command::cargo_bin("dual")
+        .unwrap()
+        .current_dir(directory.path())
+        .args(["task", "suggest"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("test-python\tpytest")
+                .and(predicate::str::contains("test-r\tRscript -e")),
+        );
+
+    Command::cargo_bin("dual")
+        .unwrap()
+        .current_dir(directory.path())
+        .args(["--json", "task", "suggest"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("tests/test_model.py")
+                .and(predicate::str::contains("tests/testthat/test-model.R"))
+                .and(predicate::str::contains("target/tests/test_ignored.py").not()),
+        );
 }
 
 #[test]
@@ -1399,6 +1530,30 @@ fn environment_preparation_does_not_inherit_common_credentials() {
 
 #[cfg(unix)]
 #[test]
+fn environment_preparation_does_not_load_project_dotenv_credentials() {
+    let fixture = backend_fixture();
+    let credential_log = fixture
+        .engine
+        .parent()
+        .unwrap()
+        .join("dotenv-credential-leak");
+    fs::write(
+        fixture.project.path().join(".env"),
+        "GITHUB_TOKEN=dotenv-secret\n",
+    )
+    .unwrap();
+
+    dual_command(&fixture)
+        .env("DUAL_ENGINE_CREDENTIAL_LOG", &credential_log)
+        .arg("up")
+        .assert()
+        .success();
+
+    assert!(!credential_log.exists());
+}
+
+#[cfg(unix)]
+#[test]
 fn up_enforces_an_existing_shared_lockfile() {
     let fixture = backend_fixture();
     write_test_lock(fixture.project.path(), "shared lock");
@@ -1727,6 +1882,119 @@ fn run_prints_task_output() {
 
 #[cfg(unix)]
 #[test]
+fn project_dotenv_reaches_tasks_and_the_invoking_environment_wins() {
+    let fixture = backend_fixture();
+    fs::write(
+        fixture.project.path().join("dual.toml"),
+        fs::read_to_string(fixture.project.path().join("dual.toml"))
+            .unwrap()
+            .replace("[tasks]\n", "[tasks]\nanalysis = \"python script.py\"\n"),
+    )
+    .unwrap();
+    fs::write(
+        fixture.project.path().join(".env"),
+        "PROJECT_ENV_VALUE=from-dotenv\n",
+    )
+    .unwrap();
+    write_ready_environment(fixture.project.path());
+    write_test_lock(fixture.project.path(), "lock");
+
+    dual_command(&fixture)
+        .env("DUAL_FAKE_PRINT_PROJECT_ENV", "1")
+        .args(["run", "analysis"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("project-env=from-dotenv"));
+
+    dual_command(&fixture)
+        .env("DUAL_FAKE_PRINT_PROJECT_ENV", "1")
+        .env("PROJECT_ENV_VALUE", "from-host")
+        .args(["run", "analysis"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("project-env=from-host"));
+}
+
+#[cfg(unix)]
+#[test]
+fn project_dotenv_reaches_shells() {
+    let fixture = backend_fixture();
+    fs::write(
+        fixture.project.path().join(".env"),
+        "PROJECT_ENV_VALUE=from-dotenv\n",
+    )
+    .unwrap();
+    write_ready_environment(fixture.project.path());
+    write_test_lock(fixture.project.path(), "lock");
+
+    dual_command(&fixture)
+        .env("DUAL_FAKE_PRINT_PROJECT_ENV", "1")
+        .arg("shell")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("project-env=from-dotenv"));
+}
+
+#[cfg(unix)]
+#[test]
+fn project_dotenv_cannot_authorize_trust_or_set_reserved_variables() {
+    let fixture = backend_fixture();
+    let home = fixture.project.path().join("untrusted-dotenv-home");
+    fs::write(
+        fixture.project.path().join(".env"),
+        "DUAL_TRUST_PROJECT=1\n",
+    )
+    .unwrap();
+
+    untrusted_dual_command(&fixture, &home)
+        .arg("up")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("project is not trusted"));
+
+    fs::write(
+        fixture.project.path().join("dual.toml"),
+        fs::read_to_string(fixture.project.path().join("dual.toml"))
+            .unwrap()
+            .replace("[tasks]\n", "[tasks]\nanalysis = \"python script.py\"\n"),
+    )
+    .unwrap();
+    write_ready_environment(fixture.project.path());
+    write_test_lock(fixture.project.path(), "lock");
+    dual_command(&fixture)
+        .args(["run", "analysis"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            ".env cannot set reserved Dual variable `DUAL_TRUST_PROJECT`",
+        ));
+}
+
+#[cfg(unix)]
+#[test]
+fn project_dotenv_changes_invalidate_existing_trust() {
+    let fixture = backend_fixture();
+    let home = fixture.project.path().join("dotenv-trust-home");
+
+    untrusted_dual_command(&fixture, &home)
+        .args(["--trust-project", "up"])
+        .assert()
+        .success();
+    fs::write(
+        fixture.project.path().join(".env"),
+        "PROJECT_ENV_VALUE=changed\n",
+    )
+    .unwrap();
+
+    untrusted_dual_command(&fixture, &home)
+        .arg("up")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("project files changed"));
+}
+
+#[cfg(unix)]
+#[test]
 fn run_executes_task_dependencies_first() {
     let fixture = backend_fixture();
     fs::write(
@@ -1798,6 +2066,11 @@ fn run_script_prepares_environment_executes_and_records_lock_metadata() {
         "# /// script\n# requires-python = \">=3.12\"\n# dependencies = [\"rich\"]\n# ///\nprint('ok')\n",
     )
     .unwrap();
+    fs::write(
+        fixture.project.path().join(".env"),
+        "PROJECT_ENV_VALUE=from-dotenv\n",
+    )
+    .unwrap();
 
     dual_command(&fixture)
         .args(["run", "analysis.py", "--no-install"])
@@ -1805,10 +2078,14 @@ fn run_script_prepares_environment_executes_and_records_lock_metadata() {
         .failure()
         .stderr(predicate::str::contains("dual sync --script"));
     dual_command(&fixture)
+        .env("DUAL_FAKE_PRINT_PROJECT_ENV", "1")
         .args(["run", "analysis.py"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Running"));
+        .stdout(
+            predicate::str::contains("Running")
+                .and(predicate::str::contains("project-env=from-dotenv")),
+        );
 
     let calls = fs::read_to_string(&fixture.log).unwrap();
     assert!(calls.contains("__dual_script"));
@@ -2276,6 +2553,9 @@ if [ "$command_name" = "run" ]; then
   if [ -n "${DUAL_FAKE_TASK_OUTPUT:-}" ]; then
     printf '%s\n' "$DUAL_FAKE_TASK_OUTPUT"
   fi
+  if [ "${DUAL_FAKE_PRINT_PROJECT_ENV:-0}" = "1" ]; then
+    printf 'project-env=%s\n' "${PROJECT_ENV_VALUE:-unset}"
+  fi
   if [ -n "${DUAL_FAKE_TASK_ERROR:-}" ]; then
     printf '%s\n' "$DUAL_FAKE_TASK_ERROR" >&2
     exit 1
@@ -2283,6 +2563,9 @@ if [ "$command_name" = "run" ]; then
   exit 0
 fi
 if [ "$command_name" = "shell" ]; then
+  if [ "${DUAL_FAKE_PRINT_PROJECT_ENV:-0}" = "1" ]; then
+    printf 'project-env=%s\n' "${PROJECT_ENV_VALUE:-unset}"
+  fi
   if [ "${DUAL_ENGINE_NESTED_SHELL:-0}" = "1" ] && [ "${DUAL_ENGINE_NESTED_GUARD:-0}" != "1" ]; then
     DUAL_ENGINE_NESTED_GUARD=1 "$DUAL_BIN" shell
   fi

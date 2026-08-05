@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 #[cfg(test)]
 use std::fs;
@@ -944,50 +945,38 @@ pub struct PythonRequirement {
 
 pub fn parse_python_requirement(requirement: &str) -> Result<PythonRequirement> {
     let value = requirement.trim();
-    if value.is_empty()
-        || value.starts_with('-')
-        || value
-            .chars()
-            .any(|character| matches!(character, '\'' | '"' | '\n' | '\r' | ';' | '@'))
-    {
+    if value.is_empty() || value.starts_with('-') || value.contains(['\n', '\r']) {
         anyhow::bail!("unsupported Python requirement: {requirement:?}");
     }
 
-    let split_at = value
-        .char_indices()
-        .find(|(_, character)| matches!(character, '<' | '>' | '=' | '!' | '~'))
-        .map(|(index, _)| index)
-        .unwrap_or(value.len());
-    let (name_and_extras, version) = value.split_at(split_at);
-    let version = if version.is_empty() { "*" } else { version };
-
-    let (name, extras) = if let Some(open) = name_and_extras.find('[') {
-        if !name_and_extras.ends_with(']') {
-            anyhow::bail!("malformed Python extras: {requirement:?}");
+    let parsed = pep508_rs::Requirement::<pep508_rs::VerbatimUrl>::from_str(value)
+        .map_err(|_| anyhow::anyhow!("unsupported Python requirement: {requirement:?}"))?;
+    if !parsed.marker.is_true() {
+        anyhow::bail!("Python environment markers are not supported yet: {requirement:?}");
+    }
+    let version = match parsed.version_or_url {
+        Some(pep508_rs::VersionOrUrl::VersionSpecifier(specifier)) => specifier
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(","),
+        Some(pep508_rs::VersionOrUrl::Url(_)) => {
+            anyhow::bail!("Python direct URL requirements are not supported yet: {requirement:?}");
         }
-        let name = &name_and_extras[..open];
-        let extras = &name_and_extras[open + 1..name_and_extras.len() - 1];
-        let extras = extras
-            .split(',')
-            .map(str::trim)
-            .map(str::to_owned)
-            .collect::<Vec<_>>();
-        if extras.is_empty() || extras.iter().any(|extra| !valid_distribution_name(extra)) {
-            anyhow::bail!("malformed Python extras: {requirement:?}");
-        }
-        (name, extras)
-    } else {
-        (name_and_extras, Vec::new())
+        None => "*".to_owned(),
     };
-
-    if !valid_distribution_name(name) || !valid_version_specifier(version) {
+    if !valid_version_specifier(&version) {
         anyhow::bail!("unsupported Python requirement: {requirement:?}");
     }
 
     Ok(PythonRequirement {
-        name: name.to_owned(),
-        extras,
-        version: version.to_owned(),
+        name: parsed.name.to_string(),
+        extras: parsed
+            .extras
+            .into_iter()
+            .map(|extra| extra.to_string())
+            .collect(),
+        version,
     })
 }
 
@@ -1039,7 +1028,11 @@ pub fn valid_r_package_reference(package: &str) -> bool {
         return parts.next().is_some_and(|part| !part.is_empty())
             && parts.next().is_some_and(|part| !part.is_empty());
     }
-    !target.starts_with(['@', '?']) && !target.contains('/')
+    let package_name = target.split(['@', '?']).next().unwrap_or_default();
+    !package_name.is_empty()
+        && !package_name.starts_with('-')
+        && !target.starts_with(['@', '?'])
+        && !target.contains('/')
 }
 
 fn valid_package_name(package: &str) -> bool {
@@ -1405,6 +1398,8 @@ enabled = true
                 version: "==2.32.3".into(),
             }
         );
+        assert!(parse_python_requirement("importlib-metadata; python_version < '3.10'").is_err());
+        assert!(parse_python_requirement("direct @ https://example.com/direct.whl").is_err());
     }
 
     #[test]

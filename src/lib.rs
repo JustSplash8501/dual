@@ -6,6 +6,8 @@ pub mod errors;
 pub mod imports;
 pub mod metadata;
 pub mod platform;
+pub mod project_env;
+pub mod project_globs;
 pub mod security;
 pub mod tasks;
 pub mod workflows;
