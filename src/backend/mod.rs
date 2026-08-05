@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 
 use crate::config::Config;
+use crate::project_env::ProjectEnvironment;
 
 pub use engine::{generate_manifest, EnvironmentBackend};
 
@@ -37,7 +38,23 @@ pub trait Backend {
     fn init_or_update(&self, config: &Config, refresh: bool) -> Result<()>;
     fn validate(&self, config: &Config) -> Result<()>;
     fn run(&self, config: &Config, task: &str, args: &[String]) -> Result<()>;
+    fn run_with_environment(
+        &self,
+        config: &Config,
+        task: &str,
+        args: &[String],
+        _project_environment: &ProjectEnvironment,
+    ) -> Result<()> {
+        self.run(config, task, args)
+    }
     fn shell(&self, config: &Config) -> Result<()>;
+    fn shell_with_environment(
+        &self,
+        config: &Config,
+        _project_environment: &ProjectEnvironment,
+    ) -> Result<()> {
+        self.shell(config)
+    }
     fn clean(&self) -> Result<Vec<PathBuf>>;
     fn doctor(&self, config: &Config) -> Result<BackendReport>;
 }

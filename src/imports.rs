@@ -74,6 +74,8 @@ pub fn import_file(project_root: &Path, source: &Path) -> Result<ImportReport> {
 
     let mut data = if file_name == "requirements.txt" {
         parse_requirements(&contents)
+    } else if file_name == "pyproject.toml" {
+        parse_pyproject_toml(&contents)?
     } else if file_name == "renv.lock" {
         parse_renv_lock(&contents)?
     } else if file_name == "uv.lock" {
@@ -85,19 +87,34 @@ pub fn import_file(project_root: &Path, source: &Path) -> Result<ImportReport> {
     } else {
         match extension.as_str() {
             "txt" => parse_requirements(&contents),
+            "toml" => parse_pyproject_toml(&contents)?,
             "yml" | "yaml" => parse_environment_yml(&contents)?,
             "lock" => parse_env_lock(&contents)?,
             _ => anyhow::bail!(
-                "unsupported import source. Expected requirements.txt, renv.lock, env.lock, uv.lock, or environment.yml"
+                "unsupported import source. Expected pyproject.toml, requirements.txt, renv.lock, env.lock, uv.lock, or environment.yml"
             ),
         }
     };
     deduplicate(&mut data.python);
     deduplicate(&mut data.r);
-    data.python
-        .retain(|package| config::parse_python_requirement(package).is_ok());
-    data.r
-        .retain(|package| config::valid_r_package_reference(package));
+    let mut skipped = Vec::new();
+    data.python.retain(|package| {
+        if config::parse_python_requirement(package).is_ok() {
+            true
+        } else {
+            skipped.push(package.clone());
+            false
+        }
+    });
+    data.r.retain(|package| {
+        if config::valid_r_package_reference(package) {
+            true
+        } else {
+            skipped.push(package.clone());
+            false
+        }
+    });
+    data.skipped.extend(skipped);
 
     let report = ImportReport {
         source: path.display().to_string(),
@@ -250,6 +267,148 @@ fn parse_requirements(contents: &str) -> ImportData {
         }
     }
     data
+}
+
+fn parse_pyproject_toml(contents: &str) -> Result<ImportData> {
+    let value: toml::Value =
+        toml::from_str(contents).context("pyproject.toml is not valid TOML")?;
+    let mut data = ImportData::default();
+
+    if let Some(project) = value.get("project").and_then(toml::Value::as_table) {
+        data.python_version = project
+            .get("requires-python")
+            .and_then(toml::Value::as_str)
+            .map(str::to_owned);
+        collect_string_array(
+            &mut data,
+            project.get("dependencies").and_then(toml::Value::as_array),
+        );
+        if let Some(optional) = project
+            .get("optional-dependencies")
+            .and_then(toml::Value::as_table)
+        {
+            for dependencies in optional.values().filter_map(toml::Value::as_array) {
+                collect_string_array(&mut data, Some(dependencies));
+            }
+        }
+    }
+
+    if let Some(poetry) = value
+        .get("tool")
+        .and_then(toml::Value::as_table)
+        .and_then(|tool| tool.get("poetry"))
+        .and_then(toml::Value::as_table)
+    {
+        collect_poetry_dependency_table(
+            &mut data,
+            poetry.get("dependencies").and_then(toml::Value::as_table),
+        );
+        if let Some(groups) = poetry.get("group").and_then(toml::Value::as_table) {
+            for group in groups.values().filter_map(toml::Value::as_table) {
+                collect_poetry_dependency_table(
+                    &mut data,
+                    group.get("dependencies").and_then(toml::Value::as_table),
+                );
+            }
+        }
+        if let Some(dev) = poetry
+            .get("dev-dependencies")
+            .and_then(toml::Value::as_table)
+        {
+            collect_poetry_dependency_table(&mut data, Some(dev));
+        }
+    }
+
+    Ok(data)
+}
+
+fn collect_string_array(data: &mut ImportData, values: Option<&Vec<toml::Value>>) {
+    let Some(values) = values else {
+        return;
+    };
+    for value in values {
+        if let Some(requirement) = value.as_str() {
+            data.python.push(requirement.to_owned());
+        } else {
+            data.skipped.push(format!("{value:?}"));
+        }
+    }
+}
+
+fn collect_poetry_dependency_table(
+    data: &mut ImportData,
+    dependencies: Option<&toml::map::Map<String, toml::Value>>,
+) {
+    let Some(dependencies) = dependencies else {
+        return;
+    };
+    for (name, dependency) in dependencies {
+        if name.eq_ignore_ascii_case("python") {
+            if data.python_version.is_none() {
+                data.python_version = dependency.as_str().map(str::to_owned);
+            }
+            continue;
+        }
+        match poetry_dependency_to_requirement(name, dependency) {
+            Some(requirement) => data.python.push(requirement),
+            None => data.skipped.push(format!("{name} = {dependency:?}")),
+        }
+    }
+}
+
+fn poetry_dependency_to_requirement(name: &str, dependency: &toml::Value) -> Option<String> {
+    if let Some(version) = dependency.as_str() {
+        return format_poetry_requirement(name, version, &[]);
+    }
+    let table = dependency.as_table()?;
+    if table.contains_key("git")
+        || table.contains_key("url")
+        || table.contains_key("path")
+        || table.contains_key("file")
+        || table.get("optional").and_then(toml::Value::as_bool) == Some(true)
+    {
+        return None;
+    }
+    let version = table
+        .get("version")
+        .and_then(toml::Value::as_str)
+        .unwrap_or("*");
+    let extras = table
+        .get("extras")
+        .and_then(toml::Value::as_array)
+        .map(|extras| {
+            extras
+                .iter()
+                .filter_map(toml::Value::as_str)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if table.get("extras").is_some() && extras.is_empty() {
+        return None;
+    }
+    format_poetry_requirement(name, version, &extras)
+}
+
+fn format_poetry_requirement(name: &str, version: &str, extras: &[&str]) -> Option<String> {
+    let extras = if extras.is_empty() {
+        String::new()
+    } else {
+        format!("[{}]", extras.join(","))
+    };
+    if version.trim() == "*" {
+        Some(format!("{name}{extras}"))
+    } else if poetry_version_is_pep508(version) {
+        Some(format!("{name}{extras}{version}"))
+    } else {
+        None
+    }
+}
+
+fn poetry_version_is_pep508(version: &str) -> bool {
+    let value = version.trim_start();
+    [">=", "<=", "==", "!=", "~=", ">", "<", "==="]
+        .iter()
+        .any(|operator| value.starts_with(operator))
 }
 
 fn parse_renv_lock(contents: &str) -> Result<ImportData> {

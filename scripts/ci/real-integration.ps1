@@ -14,14 +14,21 @@ $tasks = @'
 [tasks]
 rcheck = 'Rscript -e "cat(jsonlite::toJSON(list(ok=TRUE)))"'
 pycheck = 'python -c "import six; print(six.__version__)"'
+renvcheck = 'Rscript -e "cat(Sys.getenv(\"PROJECT_SHARED_ENV\"))"'
+pyenvcheck = 'python -c "import os; print(os.getenv(\"PROJECT_SHARED_ENV\"))"'
 '@
 $config = $config.Replace("[tasks]", $tasks.Trim())
 Set-Content dual.toml $config
+'PROJECT_SHARED_ENV=dotenv-ok' | Set-Content .env
 
 & $env:DUAL_BIN --trust-project up
 & $env:DUAL_BIN doctor
 & $env:DUAL_BIN run rcheck
 & $env:DUAL_BIN run pycheck
+$rDotenv = (& $env:DUAL_BIN run renvcheck) -join "`n"
+if (-not ($rDotenv -match "dotenv-ok")) { throw "R did not inherit project .env" }
+$pythonDotenv = (& $env:DUAL_BIN run pyenvcheck) -join "`n"
+if (-not ($pythonDotenv -match "dotenv-ok")) { throw "Python did not inherit project .env" }
 if (-not (Test-Path dual.lock)) { throw "dual.lock was not created" }
 
 # Project initialization must produce complete, runnable single-language

@@ -5,6 +5,7 @@ use dual::cli::{Cli, Commands, EngineCommand, Language, LockCommand, TaskCommand
 use dual::config::{starter_config, Config};
 use dual::imports;
 use dual::metadata::{self, AddOptions, ScriptLanguage};
+use dual::project_env::ProjectEnvironment;
 use dual::workflows::{self, ExportFormat};
 use dual::{doctor, security, tasks};
 use std::path::Path;
@@ -172,6 +173,12 @@ fn run() -> Result<()> {
         } => {
             let root = Config::find_root(&current)?;
             tasks::list_tasks(&root, json)
+        }
+        Commands::Task {
+            command: TaskCommand::Suggest,
+        } => {
+            let root = Config::find_root(&current)?;
+            tasks::suggest_tasks(&root, json)
         }
         Commands::Engine {
             command: EngineCommand::Update,
@@ -474,10 +481,11 @@ fn shell(root: &std::path::Path, backend: &impl Backend, trust_project: bool) ->
         anyhow::bail!("The project environment has not been created. Run `dual up` first.");
     }
     let trust = security::ensure_project_trusted(root, trust_project)?;
+    let project_environment = ProjectEnvironment::load(root)?;
     backend.ensure_available()?;
     backend.verify_manifest(&config)?;
     security::verify_project_unchanged(root, &trust)?;
-    backend.shell(&config)?;
+    backend.shell_with_environment(&config, &project_environment)?;
     security::verify_project_unchanged(root, &trust)
 }
 

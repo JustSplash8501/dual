@@ -16,14 +16,19 @@ path.write_text(path.read_text().replace(
     """[tasks]
 rcheck = "Rscript -e \\"cat(jsonlite::toJSON(list(ok=TRUE)))\\""
 pycheck = "python -c \\"import six; print(six.__version__)\\""
+renvcheck = "Rscript -e \\"cat(Sys.getenv('PROJECT_SHARED_ENV'))\\""
+pyenvcheck = "python -c \\"import os; print(os.environ['PROJECT_SHARED_ENV'])\\""
 """,
 ))
 PY
+printf '%s\n' 'PROJECT_SHARED_ENV=dotenv-ok' > .env
 
 "$DUAL_BIN" --trust-project up
 "$DUAL_BIN" doctor
 "$DUAL_BIN" run rcheck
 "$DUAL_BIN" run pycheck
+"$DUAL_BIN" run renvcheck | grep -q "dotenv-ok"
+"$DUAL_BIN" run pyenvcheck | grep -q "dotenv-ok"
 test -s dual.lock
 
 # Project initialization must produce complete, runnable single-language

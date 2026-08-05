@@ -7,6 +7,8 @@ use serde::Serialize;
 use crate::backend::Backend;
 use crate::config::{Config, TaskConfig};
 use crate::errors::DualError;
+use crate::project_env::ProjectEnvironment;
+use crate::project_globs::{self, TestDiscovery};
 use crate::security;
 
 pub fn lookup<'a>(config: &'a Config, name: &str) -> Result<&'a TaskConfig> {
@@ -41,6 +43,7 @@ pub fn run_task(
         anyhow::bail!("The project environment has not been created. Run `dual up` first.");
     }
     let trust = security::ensure_project_trusted(root, trust_project)?;
+    let project_environment = ProjectEnvironment::load(root)?;
     backend.ensure_available()?;
     backend.verify_manifest(&config)?;
     security::verify_project_unchanged(root, &trust)?;
@@ -48,7 +51,7 @@ pub fn run_task(
     for task in &task_order {
         println!("Running task `{task}`...");
         let task_args = if task == name { args } else { &[] };
-        backend.run(&config, task, task_args)?;
+        backend.run_with_environment(&config, task, task_args, &project_environment)?;
     }
     security::verify_project_unchanged(root, &trust)
 }
@@ -79,6 +82,21 @@ pub fn list_tasks(root: &Path, json: bool) -> Result<()> {
                     task.deps().join(", ")
                 );
             }
+        }
+    }
+    Ok(())
+}
+
+pub fn suggest_tasks(root: &Path, json: bool) -> Result<()> {
+    let discovery = project_globs::discover_tests(root)?;
+    let suggestions = TaskSuggestions::from_discovery(discovery);
+    if json {
+        println!("{}", serde_json::to_string_pretty(&suggestions)?);
+    } else if suggestions.suggestions.is_empty() {
+        println!("No common test files were found.");
+    } else {
+        for suggestion in &suggestions.suggestions {
+            println!("{}\t{}", suggestion.name, suggestion.command);
         }
     }
     Ok(())
@@ -131,6 +149,53 @@ struct TaskReport {
     name: String,
     command: String,
     deps: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct TaskSuggestions {
+    python_tests: Vec<String>,
+    r_tests: Vec<String>,
+    suggestions: Vec<TaskSuggestion>,
+}
+
+impl TaskSuggestions {
+    fn from_discovery(discovery: TestDiscovery) -> Self {
+        let mut suggestions = Vec::new();
+        if discovery.has_python() {
+            suggestions.push(TaskSuggestion {
+                name: "test-python".into(),
+                command: "pytest".into(),
+                packages: vec!["pytest".into()],
+            });
+        }
+        if discovery.has_r() {
+            suggestions.push(TaskSuggestion {
+                name: "test-r".into(),
+                command: "Rscript -e \"testthat::test_dir('tests/testthat')\"".into(),
+                packages: vec!["testthat".into()],
+            });
+        }
+        Self {
+            python_tests: discovery
+                .python
+                .into_iter()
+                .map(|path| path.display().to_string())
+                .collect(),
+            r_tests: discovery
+                .r
+                .into_iter()
+                .map(|path| path.display().to_string())
+                .collect(),
+            suggestions,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct TaskSuggestion {
+    name: String,
+    command: String,
+    packages: Vec<String>,
 }
 
 #[cfg(test)]
