@@ -37,6 +37,7 @@ pub fn run_task(
     args: &[String],
     trust_project: bool,
 ) -> Result<()> {
+    let _project_lock = security::acquire_project_lock(root, "project")?;
     let config = Config::load(root)?;
     let task_order = resolve_task_order(&config, name)?;
 

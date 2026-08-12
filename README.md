@@ -463,6 +463,13 @@ generated manifest, shared lockfile, readiness marker, and R/Python bridge. A
 failed first preparation removes its incomplete generated state; downloaded
 package caches may remain available for the next attempt.
 
+Commands that edit project configuration, prepare or use the generated
+environment, run tasks, prepare managed shell state, migrate the lockfile, clean
+generated state, or write dependency exports take a per-project process lock.
+This keeps concurrent `dual` commands from overwriting `.dual/`, `dual.toml`,
+or `dual.lock`. The default wait is five minutes; set `DUAL_LOCK_TIMEOUT` to a
+number of seconds to fail sooner or wait longer.
+
 `dual clean` removes only `.dual/`. It deliberately preserves `dual.lock`,
 `dual.toml`, scripts, data, results, and other user files.
 

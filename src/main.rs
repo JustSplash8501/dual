@@ -38,6 +38,8 @@ fn run() -> Result<()> {
                     anyhow::bail!("a project name cannot be used with `dual init --script`");
                 }
                 let script = metadata::absolute_path(&script)?;
+                let _project_lock =
+                    security::acquire_project_lock(script_parent(&script), "script")?;
                 metadata::initialize(&script, python.as_deref(), r.as_deref(), force)?;
                 println!("Initialized inline metadata in {}.", script.display());
                 return Ok(());
@@ -70,6 +72,8 @@ fn run() -> Result<()> {
                     (true, true) => unreachable!("clap rejects conflicting flags"),
                 };
                 let script = metadata::absolute_path(&script)?;
+                let _project_lock =
+                    security::acquire_project_lock(script_parent(&script), "script")?;
                 metadata::add(
                     &script,
                     AddOptions {
@@ -164,6 +168,7 @@ fn run() -> Result<()> {
             } else {
                 ExportFormat::Dockerfile
             };
+            let _project_lock = security::acquire_project_lock(&root, "project")?;
             let path = workflows::export(&root, format)?;
             println!("Wrote {}.", path.display());
             Ok(())
@@ -199,6 +204,7 @@ fn run() -> Result<()> {
         } => {
             let root = Config::find_root(&current)?;
             let backend = EnvironmentBackend::new(&root, verbose);
+            let _project_lock = security::acquire_project_lock(&root, "project")?;
             if backend.migrate_lock()? {
                 println!("Migrated dual.lock to the current format.");
             } else {
@@ -227,6 +233,7 @@ fn run() -> Result<()> {
             let root = Config::find_root_optional(&current);
             if let Some(root) = root {
                 let backend = EnvironmentBackend::new(&root, verbose);
+                let _project_lock = security::acquire_project_lock(&root, "project")?;
                 if backend.environment_exists() {
                     dual::cache::prepare()?;
                     let trust = security::ensure_project_trusted(&root, trust_project)?;
@@ -247,7 +254,12 @@ fn run() -> Result<()> {
     }
 }
 
+fn script_parent(script: &std::path::Path) -> &std::path::Path {
+    script.parent().unwrap_or_else(|| std::path::Path::new("."))
+}
+
 fn import(root: &std::path::Path, file: &std::path::Path, json: bool) -> Result<()> {
+    let _project_lock = security::acquire_project_lock(root, "project")?;
     security::reject_symlink_if_present(&Config::path(root), "dual.toml")?;
     let preserve_trust = security::project_is_trusted(root)?;
     let report = imports::import_file(root, file)?;
@@ -296,6 +308,7 @@ fn parse_project_add_items(items: &[String]) -> Result<(Language, &[String])> {
 }
 
 fn remove(root: &std::path::Path, language: Language, packages: &[String]) -> Result<()> {
+    let _project_lock = security::acquire_project_lock(root, "project")?;
     security::reject_symlink_if_present(&Config::path(root), "dual.toml")?;
     let preserve_trust = security::project_is_trusted(root)?;
     let section = match language {
@@ -314,6 +327,7 @@ fn remove(root: &std::path::Path, language: Language, packages: &[String]) -> Re
 }
 
 fn enable(root: &std::path::Path, language: Language, version: Option<&str>) -> Result<()> {
+    let _project_lock = security::acquire_project_lock(root, "project")?;
     let path = Config::path(root);
     security::reject_symlink_if_present(&path, "dual.toml")?;
     let preserve_trust = security::project_is_trusted(root)?;
@@ -340,6 +354,7 @@ fn enable(root: &std::path::Path, language: Language, version: Option<&str>) -> 
 }
 
 fn disable(root: &std::path::Path, language: Language, force: bool) -> Result<()> {
+    let _project_lock = security::acquire_project_lock(root, "project")?;
     let path = Config::path(root);
     security::reject_symlink_if_present(&path, "dual.toml")?;
     let preserve_trust = security::project_is_trusted(root)?;
@@ -386,6 +401,7 @@ fn init(
     python: Option<&str>,
     r: Option<&str>,
 ) -> Result<()> {
+    let _project_lock = security::acquire_project_lock(root, "project")?;
     let inferred_name = root
         .file_name()
         .and_then(std::ffi::OsStr::to_str)
@@ -425,6 +441,7 @@ fn init(
 }
 
 fn add(root: &std::path::Path, language: Language, packages: &[String]) -> Result<()> {
+    let _project_lock = security::acquire_project_lock(root, "project")?;
     security::reject_symlink_if_present(&Config::path(root), "dual.toml")?;
     let preserve_trust = security::project_is_trusted(root)?;
     let path = Config::path(root);
@@ -460,6 +477,7 @@ fn up(
     refresh: bool,
     trust_project: bool,
 ) -> Result<()> {
+    let _project_lock = security::acquire_project_lock(root, "project")?;
     dual::cache::prepare()?;
     let config = Config::load(root)?;
     let trust = security::ensure_project_trusted(root, trust_project)?;
@@ -505,6 +523,7 @@ fn shell(root: &std::path::Path, backend: &impl Backend, trust_project: bool) ->
 }
 
 fn clean(root: &std::path::Path, backend: &impl Backend, yes: bool) -> Result<()> {
+    let _project_lock = security::acquire_project_lock(root, "project")?;
     Config::load(root)?;
     if !yes && !confirm_clean()? {
         println!("Clean cancelled.");

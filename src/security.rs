@@ -1,16 +1,25 @@
 use std::env;
 use std::fs::{self, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::path::{Component, Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
+use fs2::FileExt;
 use sha2::{Digest, Sha256};
 
 pub const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 pub const MAX_LOCK_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_PROJECT_FILES: usize = 100_000;
 const MAX_PROJECT_BYTES: u64 = 1024 * 1024 * 1024;
+const DEFAULT_LOCK_TIMEOUT: Duration = Duration::from_secs(300);
+const LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(100);
+
+#[derive(Debug)]
+pub struct ProcessLock {
+    file: fs::File,
+}
 
 #[derive(Clone, Debug)]
 pub struct ProjectTrust {
@@ -110,6 +119,71 @@ pub fn write_file_atomic(path: &Path, contents: &[u8], label: &str) -> Result<()
             .with_context(|| format!("could not sync directory for {}", path.display()))?;
     }
     Ok(())
+}
+
+pub fn acquire_project_lock(root: &Path, label: &str) -> Result<ProcessLock> {
+    acquire_project_lock_with_timeout(root, lock_timeout()?, label)
+}
+
+pub fn acquire_engine_lock(label: &str) -> Result<ProcessLock> {
+    let path = default_dual_home().join("locks").join("engine.lock");
+    acquire_state_lock(&path, lock_timeout()?, label)
+}
+
+fn acquire_project_lock_with_timeout(
+    root: &Path,
+    timeout: Duration,
+    label: &str,
+) -> Result<ProcessLock> {
+    let canonical = fs::canonicalize(root)
+        .with_context(|| format!("could not canonicalize project root {}", root.display()))?;
+    let path = project_lock_path_for_canonical_root(&canonical);
+    acquire_state_lock(&path, timeout, label)
+}
+
+fn acquire_state_lock(path: &Path, timeout: Duration, label: &str) -> Result<ProcessLock> {
+    let directory = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("{label} lock path has no parent directory"))?;
+    create_private_directory_all(directory, &format!("{label} lock directory"))?;
+    acquire_lock_file(path, timeout, label)
+}
+
+fn acquire_lock_file(path: &Path, timeout: Duration, label: &str) -> Result<ProcessLock> {
+    reject_symlink_if_present(path, &format!("{label} lock"))?;
+    let file = open_lock_no_follow(path)
+        .with_context(|| format!("could not open {label} lock file {}", path.display()))?;
+    let start = Instant::now();
+    loop {
+        match file.try_lock_exclusive() {
+            Ok(()) => return Ok(ProcessLock { file }),
+            Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                if timeout.is_zero() || start.elapsed() >= timeout {
+                    anyhow::bail!(
+                        "Timed out waiting for the {label} lock at {}. Another `dual` \
+                         command may be running. Set DUAL_LOCK_TIMEOUT to wait longer.",
+                        path.display()
+                    );
+                }
+                thread::sleep(LOCK_RETRY_INTERVAL.min(timeout.saturating_sub(start.elapsed())));
+            }
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("could not acquire {label} lock {}", path.display()));
+            }
+        }
+    }
+}
+
+fn lock_timeout() -> Result<Duration> {
+    let Some(value) = env::var_os("DUAL_LOCK_TIMEOUT") else {
+        return Ok(DEFAULT_LOCK_TIMEOUT);
+    };
+    let value = value.to_string_lossy();
+    let seconds = value
+        .parse::<u64>()
+        .context("DUAL_LOCK_TIMEOUT must be a non-negative number of seconds")?;
+    Ok(Duration::from_secs(seconds))
 }
 
 pub fn reject_symlink(path: &Path, label: &str) -> Result<()> {
@@ -537,6 +611,16 @@ fn trust_path_for_canonical_root(canonical: &Path) -> PathBuf {
         .join(format!("{key:x}.sha256"))
 }
 
+fn project_lock_path_for_canonical_root(canonical: &Path) -> PathBuf {
+    let mut hasher = Sha256::new();
+    hash_path(&mut hasher, canonical);
+    let key = hasher.finalize();
+    default_dual_home()
+        .join("locks")
+        .join("projects")
+        .join(format!("{key:x}.lock"))
+}
+
 fn hash_path(hasher: &mut Sha256, path: &Path) {
     #[cfg(unix)]
     {
@@ -579,9 +663,12 @@ fn write_trust_record(path: &Path, fingerprint: &str) -> Result<()> {
 
 pub fn create_private_directory(path: &Path, label: &str) -> Result<()> {
     reject_symlink_if_present(path, label)?;
-    if !path.exists() {
-        fs::create_dir(path).with_context(|| format!("could not create {label}"))?;
+    match fs::create_dir(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error).with_context(|| format!("could not create {label}")),
     }
+    reject_symlink(path, label)?;
     let metadata = fs::metadata(path)?;
     if !metadata.is_dir() {
         anyhow::bail!("{label} is not a directory: {}", path.display());
@@ -594,6 +681,29 @@ pub fn create_private_directory(path: &Path, label: &str) -> Result<()> {
     Ok(())
 }
 
+fn create_private_directory_all(path: &Path, label: &str) -> Result<()> {
+    let home = default_dual_home();
+    let relative = path
+        .strip_prefix(&home)
+        .with_context(|| format!("{label} escaped the Dual data directory"))?;
+    create_private_directory(&home, "dual data directory")?;
+    let mut current = home;
+    for component in relative.components() {
+        match component {
+            Component::Normal(_) => create_private_directory(&current, label)?,
+            Component::CurDir | Component::ParentDir => {
+                anyhow::bail!("{label} path is invalid: {}", path.display())
+            }
+            Component::Prefix(_) | Component::RootDir => {
+                anyhow::bail!("{label} path is invalid: {}", path.display())
+            }
+        }
+        current.push(component.as_os_str());
+    }
+    create_private_directory(&current, label)?;
+    Ok(())
+}
+
 fn open_read_no_follow(path: &Path) -> Result<fs::File> {
     let mut options = OpenOptions::new();
     options.read(true);
@@ -603,6 +713,23 @@ fn open_read_no_follow(path: &Path) -> Result<fs::File> {
         options.custom_flags(libc::O_NOFOLLOW);
     }
     Ok(options.open(path)?)
+}
+
+fn open_lock_no_follow(path: &Path) -> Result<fs::File> {
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    Ok(options.open(path)?)
+}
+
+impl Drop for ProcessLock {
+    fn drop(&mut self) {
+        let _ = <fs::File as FileExt>::unlock(&self.file);
+    }
 }
 
 fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
@@ -647,6 +774,18 @@ mod tests {
         hash_path(&mut second, Path::new(OsStr::from_bytes(b"script-\x81")));
 
         assert_ne!(first.finalize(), second.finalize());
+    }
+
+    #[test]
+    fn process_lock_times_out_when_already_held() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("project.lock");
+        let _held = acquire_lock_file(&path, Duration::from_secs(1), "project").unwrap();
+        let error = acquire_lock_file(&path, Duration::ZERO, "project").unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("Timed out waiting for the project lock"));
     }
 
     #[test]

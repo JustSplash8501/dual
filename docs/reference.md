@@ -474,6 +474,12 @@ Creates or updates the project environment, validates it, and refreshes project 
 
 The environment engine is installed automatically when needed. Package tooling runs with common credential environment variables removed unless `DUAL_ALLOW_CREDENTIALS=1` is set.
 
+Commands that edit project files, prepare or use generated environments, run
+tasks, prepare managed shell state, migrate locks, clean state, or write exports
+hold a per-project process lock. Concurrent commands wait for the active command
+to finish instead of mutating `.dual/`, `dual.toml`, or `dual.lock` at the same
+time.
+
 Updates become ready only after dependency installation, source-backed R
 package installation, R/Python bridge preparation, and runtime validation all
 succeed. On failure, Dual restores the previous generated manifest,
@@ -1211,6 +1217,9 @@ not already defined by the invoking environment or command.
 `DUAL_TRUST_PROJECT`: Set to `1`, `true`, or `yes` to authorize trust noninteractively.
 
 `DUAL_ALLOW_CREDENTIALS`: Set to `1`, `true`, or `yes` to allow common credential variables through to package tooling.
+
+`DUAL_LOCK_TIMEOUT`: Number of seconds to wait for a project or engine process
+lock before failing. The default is `300`.
 
 `DUAL_ENGINE_PATH`: Use a specific environment engine executable.
 
