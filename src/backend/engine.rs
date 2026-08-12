@@ -14,6 +14,7 @@ use sha2::{Digest, Sha256};
 use wait_timeout::ChildExt;
 
 use crate::backend::{Backend, BackendReport, BridgeReport};
+use crate::cache;
 use crate::config::{parse_python_requirement, Config};
 use crate::errors::DualError;
 use crate::platform;
@@ -349,8 +350,13 @@ impl EnvironmentBackend {
             DualError::BackendStart("environment support has not been installed yet".to_owned())
         })?;
         self.verify_engine_path(&path)?;
+        cache::prepare()?;
         let mut command = Command::new(path);
         command.current_dir(&self.root);
+        command.env("PIXI_CACHE_DIR", cache::environment_cache_dir()?);
+        command.env("PKG_PACKAGE_CACHE_DIR", cache::r_package_cache_dir()?);
+        command.env("PKG_METADATA_CACHE_DIR", cache::r_metadata_cache_dir()?);
+        command.env("DUAL_CACHE_ACTIVE", "1");
         Ok(command)
     }
 
@@ -600,6 +606,7 @@ impl EnvironmentBackend {
     }
 
     fn execute(&self, args: &[&str], friendly_action: &str) -> Result<()> {
+        let _cache_guard = cache::lock_shared()?;
         let mut command = self.internal_command(args)?;
         if self.verbose {
             eprintln!("{}", verbose_status(friendly_action));
@@ -615,6 +622,7 @@ impl EnvironmentBackend {
     }
 
     fn execute_task_command(&self, mut command: Command, task: &str) -> Result<()> {
+        let _cache_guard = cache::lock_shared()?;
         let status = command
             .stdin(Stdio::inherit())
             .stdout(Stdio::inherit())
@@ -628,6 +636,7 @@ impl EnvironmentBackend {
     }
 
     fn capture(&self, args: &[&str]) -> Result<ExitStatus> {
+        let _cache_guard = cache::lock_shared()?;
         if self.verbose {
             eprintln!("{}", verbose_status("Checking project environment"));
         }
@@ -677,6 +686,7 @@ impl EnvironmentBackend {
     }
 
     fn capture_output(&self, args: &[&str], timeout: Duration) -> Result<Output> {
+        let _cache_guard = cache::lock_shared()?;
         if self.verbose {
             eprintln!("{}", verbose_status("Checking project environment"));
         }
@@ -1354,6 +1364,7 @@ fn unix_shell(
     config: &Config,
     project_environment: &ProjectEnvironment,
 ) -> Result<()> {
+    let _cache_guard = cache::lock_shared()?;
     let manifest = backend.manifest_arg();
     if backend.verbose {
         eprintln!("{}", verbose_status("Opening project shell"));
@@ -1388,6 +1399,7 @@ fn windows_shell(
     config: &Config,
     project_environment: &ProjectEnvironment,
 ) -> Result<()> {
+    let _cache_guard = cache::lock_shared()?;
     let manifest = backend.manifest_arg();
     let output = backend
         .internal_command(&[

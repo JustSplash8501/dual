@@ -22,6 +22,14 @@ Set-Content dual.toml $config
 'PROJECT_SHARED_ENV=dotenv-ok' | Set-Content .env
 
 & $env:DUAL_BIN --trust-project up
+$cacheInfo = (& $env:DUAL_BIN --json cache info) -join "`n"
+if (-not ($cacheInfo -match '"exists": true')) { throw "Dual cache was not created" }
+if (-not (Test-Path (Join-Path $env:DUAL_CACHE_DIR ".dual-cache"))) {
+    throw "Dual cache marker was not created"
+}
+if (-not (Test-Path (Join-Path $env:DUAL_CACHE_DIR "v1/environment"))) {
+    throw "Dual environment cache bucket was not created"
+}
 & $env:DUAL_BIN doctor
 & $env:DUAL_BIN run rcheck
 & $env:DUAL_BIN run pycheck

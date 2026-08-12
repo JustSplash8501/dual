@@ -44,6 +44,7 @@ pub fn run_task(
     if !backend.environment_exists() {
         anyhow::bail!("The project environment has not been created. Run `dual up` first.");
     }
+    crate::cache::prepare()?;
     let trust = security::ensure_project_trusted(root, trust_project)?;
     let project_environment = ProjectEnvironment::load(root)?;
     backend.ensure_available()?;

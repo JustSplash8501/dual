@@ -336,6 +336,7 @@ fn project_fingerprints(root: &Path) -> Result<ProjectFingerprints> {
     let canonical = fs::canonicalize(root)
         .with_context(|| format!("could not canonicalize project root {}", root.display()))?;
     let dual_home = excluded_dual_home_relative(&canonical);
+    let cache = excluded_cache_relative(&canonical);
     let mut trust = ProjectHasher::new(&canonical);
     let mut execution = ProjectHasher::without_lock(&canonical);
     let mut files = 0;
@@ -346,6 +347,7 @@ fn project_fingerprints(root: &Path) -> Result<ProjectFingerprints> {
             include_lock: true,
             excluded: &[],
             excluded_dual_home: dual_home.as_deref(),
+            excluded_cache: cache.as_deref(),
         },
         root,
         &mut [&mut trust, &mut execution],
@@ -367,6 +369,7 @@ fn project_fingerprint_excluding(
     let canonical = fs::canonicalize(root)
         .with_context(|| format!("could not canonicalize project root {}", root.display()))?;
     let dual_home = excluded_dual_home_relative(&canonical);
+    let cache = excluded_cache_relative(&canonical);
     let mut hasher = ProjectHasher::new(&canonical);
     let mut files = 0;
     let mut bytes = 0;
@@ -376,6 +379,7 @@ fn project_fingerprint_excluding(
             include_lock,
             excluded,
             excluded_dual_home: dual_home.as_deref(),
+            excluded_cache: cache.as_deref(),
         },
         root,
         &mut [&mut hasher],
@@ -390,6 +394,7 @@ struct HashContext<'a> {
     include_lock: bool,
     excluded: &'a [PathBuf],
     excluded_dual_home: Option<&'a Path>,
+    excluded_cache: Option<&'a Path>,
 }
 
 struct ProjectHasher {
@@ -472,6 +477,9 @@ fn hash_project_directory(
             || context
                 .excluded_dual_home
                 .is_some_and(|dual_home| relative.starts_with(dual_home))
+            || context
+                .excluded_cache
+                .is_some_and(|cache| relative.starts_with(cache))
         {
             continue;
         }
@@ -539,6 +547,15 @@ fn excluded_dual_home_relative(root: &Path) -> Option<PathBuf> {
     let home = normalize_identity_path(&default_dual_home());
     home.is_absolute()
         .then(|| home.strip_prefix(root).ok().map(Path::to_path_buf))
+        .flatten()
+        .filter(|path| !path.as_os_str().is_empty())
+}
+
+fn excluded_cache_relative(root: &Path) -> Option<PathBuf> {
+    let cache = normalize_identity_path(&crate::cache::owned_cache_dir()?);
+    cache
+        .is_absolute()
+        .then(|| cache.strip_prefix(root).ok().map(Path::to_path_buf))
         .flatten()
         .filter(|path| !path.as_os_str().is_empty())
 }
@@ -646,9 +663,12 @@ fn write_trust_record(path: &Path, fingerprint: &str) -> Result<()> {
 
 pub fn create_private_directory(path: &Path, label: &str) -> Result<()> {
     reject_symlink_if_present(path, label)?;
-    if !path.exists() {
-        fs::create_dir(path).with_context(|| format!("could not create {label}"))?;
+    match fs::create_dir(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error).with_context(|| format!("could not create {label}")),
     }
+    reject_symlink(path, label)?;
     let metadata = fs::metadata(path)?;
     if !metadata.is_dir() {
         anyhow::bail!("{label} is not a directory: {}", path.display());

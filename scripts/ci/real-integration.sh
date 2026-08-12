@@ -24,6 +24,10 @@ PY
 printf '%s\n' 'PROJECT_SHARED_ENV=dotenv-ok' > .env
 
 "$DUAL_BIN" --trust-project up
+"$DUAL_BIN" --json cache info |
+    python3 -c 'import json, sys; assert json.load(sys.stdin)["exists"] is True'
+test -f "$DUAL_CACHE_DIR/.dual-cache"
+test -d "$DUAL_CACHE_DIR/v1/environment"
 "$DUAL_BIN" doctor
 "$DUAL_BIN" run rcheck
 "$DUAL_BIN" run pycheck
