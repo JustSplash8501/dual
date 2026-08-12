@@ -48,6 +48,7 @@ pub fn run_script(
         return Ok(());
     }
 
+    crate::cache::prepare()?;
     let backend = EnvironmentBackend::for_script(&effective.root, &effective.script, verbose);
     let trust = security::ensure_project_trusted(&effective.root, trust_project)?;
     let project_environment = ProjectEnvironment::load(&effective.root)?;
@@ -103,6 +104,7 @@ pub fn sync_script(path: &Path, verbose: bool, trust_project: bool, dry_run: boo
         );
         return Ok(());
     }
+    crate::cache::prepare()?;
     let backend = EnvironmentBackend::for_script(&effective.root, &effective.script, verbose);
     let trust = security::ensure_project_trusted(&effective.root, trust_project)?;
     backend.ensure_available()?;
@@ -136,6 +138,7 @@ fn sync_config(
     trust_project: bool,
     refresh: bool,
 ) -> Result<()> {
+    crate::cache::prepare()?;
     let backend = EnvironmentBackend::new(root, verbose);
     let trust = security::ensure_project_trusted(root, trust_project)?;
     backend.ensure_available()?;

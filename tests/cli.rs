@@ -1407,6 +1407,139 @@ fn clean_with_only_a_shared_lockfile_is_safe() {
 }
 
 #[test]
+fn cache_commands_report_prune_and_clean_versioned_data() {
+    let directory = tempdir().unwrap();
+    let cache = directory.path().join("shared-cache");
+
+    Command::cargo_bin("dual")
+        .unwrap()
+        .current_dir(directory.path())
+        .env("DUAL_CACHE_DIR", &cache)
+        .args(["--json", "cache", "info"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("\"exists\": false")
+                .and(predicate::str::contains("\"layout_version\": 1")),
+        );
+    assert!(!cache.exists());
+
+    Command::cargo_bin("dual")
+        .unwrap()
+        .current_dir(directory.path())
+        .env("DUAL_CACHE_DIR", &cache)
+        .args(["cache", "prune"])
+        .assert()
+        .success();
+
+    fs::create_dir_all(cache.join("v0/environment")).unwrap();
+    fs::write(cache.join("v0/environment/old-package"), b"obsolete").unwrap();
+    fs::create_dir_all(cache.join("v1/environment")).unwrap();
+    fs::write(cache.join("v1/environment/current-package"), b"current").unwrap();
+
+    Command::cargo_bin("dual")
+        .unwrap()
+        .current_dir(directory.path())
+        .env("DUAL_CACHE_DIR", &cache)
+        .args(["--json", "cache", "prune"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"files\": 1"));
+    assert!(!cache.join("v0").exists());
+    assert!(cache.join("v1/environment/current-package").is_file());
+
+    Command::cargo_bin("dual")
+        .unwrap()
+        .current_dir(directory.path())
+        .env("DUAL_CACHE_DIR", &cache)
+        .args(["cache", "clean", "--yes"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Removed cached package data"));
+    assert!(!cache.join("v1").exists());
+    assert!(cache.join(".dual-cache").is_file());
+}
+
+#[test]
+fn cache_commands_refuse_an_unmarked_nonempty_directory() {
+    let directory = tempdir().unwrap();
+    let cache = directory.path().join("not-a-cache");
+    fs::create_dir(&cache).unwrap();
+    fs::write(cache.join("important.txt"), "keep me").unwrap();
+
+    Command::cargo_bin("dual")
+        .unwrap()
+        .current_dir(directory.path())
+        .env("DUAL_CACHE_DIR", &cache)
+        .args(["cache", "clean", "--yes"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "refusing to use non-empty cache directory without a Dual marker",
+        ));
+
+    assert_eq!(
+        fs::read_to_string(cache.join("important.txt")).unwrap(),
+        "keep me"
+    );
+}
+
+#[test]
+fn cache_maintenance_refuses_to_deadlock_inside_an_active_environment() {
+    let directory = tempdir().unwrap();
+    let cache = directory.path().join("shared-cache");
+
+    Command::cargo_bin("dual")
+        .unwrap()
+        .current_dir(directory.path())
+        .env("DUAL_CACHE_DIR", &cache)
+        .env("DUAL_CACHE_ACTIVE", "1")
+        .args(["cache", "clean", "--yes"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "cache maintenance cannot run inside an active Dual task or shell",
+        ));
+
+    assert!(!cache.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn cache_clean_removes_symlinks_without_following_them() {
+    use std::os::unix::fs::symlink;
+
+    let directory = tempdir().unwrap();
+    let cache = directory.path().join("shared-cache");
+    let outside = directory.path().join("outside");
+    fs::create_dir(&outside).unwrap();
+    fs::write(outside.join("important.txt"), "keep me").unwrap();
+
+    Command::cargo_bin("dual")
+        .unwrap()
+        .current_dir(directory.path())
+        .env("DUAL_CACHE_DIR", &cache)
+        .args(["cache", "prune"])
+        .assert()
+        .success();
+    fs::create_dir_all(cache.join("v1/environment")).unwrap();
+    symlink(&outside, cache.join("v1/environment/link")).unwrap();
+
+    Command::cargo_bin("dual")
+        .unwrap()
+        .current_dir(directory.path())
+        .env("DUAL_CACHE_DIR", &cache)
+        .args(["cache", "clean", "--yes"])
+        .assert()
+        .success();
+
+    assert_eq!(
+        fs::read_to_string(outside.join("important.txt")).unwrap(),
+        "keep me"
+    );
+}
+
+#[test]
 fn clean_does_not_remove_user_files() {
     let directory = initialized_project();
     fs::create_dir(directory.path().join(".dual")).unwrap();
@@ -1762,6 +1895,35 @@ fn environment_preparation_does_not_inherit_common_credentials() {
         .success();
 
     assert!(!credential_log.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn environment_preparation_uses_dual_owned_cache_buckets() {
+    let fixture = backend_fixture();
+    let cache = fixture.engine.parent().unwrap().join("custom-cache");
+    let cache_log = fixture.engine.parent().unwrap().join("cache-paths.log");
+
+    dual_command(&fixture)
+        .env("DUAL_CACHE_DIR", &cache)
+        .env("DUAL_ENGINE_CACHE_LOG", &cache_log)
+        .arg("up")
+        .assert()
+        .success();
+
+    let paths = fs::read_to_string(cache_log).unwrap();
+    assert!(paths.contains(&format!(
+        "PIXI_CACHE_DIR={}",
+        cache.join("v1/environment").display()
+    )));
+    assert!(paths.contains(&format!(
+        "PKG_PACKAGE_CACHE_DIR={}",
+        cache.join("v1/r/packages").display()
+    )));
+    assert!(paths.contains(&format!(
+        "PKG_METADATA_CACHE_DIR={}",
+        cache.join("v1/r/metadata").display()
+    )));
 }
 
 #[cfg(unix)]
@@ -2492,6 +2654,7 @@ fn up_automatically_installs_private_environment_support() {
     command
         .current_dir(fixture.project.path())
         .env("DUAL_HOME", &home)
+        .env("DUAL_CACHE_DIR", home.join("cache"))
         .env("DUAL_ENGINE_DISABLE_PATH_FALLBACK", "1")
         .env("DUAL_ENGINE_DOWNLOAD_URL", download_url)
         .env("DUAL_ENGINE_SHA256", checksum)
@@ -2520,6 +2683,7 @@ fn automatic_install_failure_has_a_user_facing_error() {
         .unwrap()
         .current_dir(directory.path())
         .env("DUAL_HOME", &home)
+        .env("DUAL_CACHE_DIR", home.join("cache"))
         .env("DUAL_ENGINE_DISABLE_PATH_FALLBACK", "1")
         .env("DUAL_TRUST_PROJECT", "1")
         .env(
@@ -2545,6 +2709,7 @@ fn automatic_install_rejects_a_bad_checksum() {
         .unwrap()
         .current_dir(fixture.project.path())
         .env("DUAL_HOME", &home)
+        .env("DUAL_CACHE_DIR", home.join("cache"))
         .env("DUAL_ENGINE_DISABLE_PATH_FALLBACK", "1")
         .env("DUAL_TRUST_PROJECT", "1")
         .env(
@@ -2575,6 +2740,7 @@ fn managed_engine_is_reverified_before_execution() {
         .unwrap()
         .current_dir(fixture.project.path())
         .env("DUAL_HOME", &home)
+        .env("DUAL_CACHE_DIR", home.join("cache"))
         .env("DUAL_ENGINE_DISABLE_PATH_FALLBACK", "1")
         .env(
             "DUAL_ENGINE_DOWNLOAD_URL",
@@ -2594,6 +2760,7 @@ fn managed_engine_is_reverified_before_execution() {
         .unwrap()
         .current_dir(fixture.project.path())
         .env("DUAL_HOME", &home)
+        .env("DUAL_CACHE_DIR", home.join("cache"))
         .env("DUAL_ENGINE_DISABLE_PATH_FALLBACK", "1")
         .env("DUAL_ENGINE_SHA256", checksum)
         .env("DUAL_TRUST_PROJECT", "1")
@@ -2615,6 +2782,7 @@ fn engine_update_and_uninstall_manage_private_engine() {
         .unwrap()
         .current_dir(fixture.project.path())
         .env("DUAL_HOME", &home)
+        .env("DUAL_CACHE_DIR", home.join("cache"))
         .env("DUAL_ENGINE_DOWNLOAD_URL", download_url)
         .env("DUAL_ENGINE_SHA256", checksum)
         .args(["engine", "update"])
@@ -2627,6 +2795,7 @@ fn engine_update_and_uninstall_manage_private_engine() {
         .unwrap()
         .current_dir(fixture.project.path())
         .env("DUAL_HOME", &home)
+        .env("DUAL_CACHE_DIR", home.join("cache"))
         .args(["engine", "uninstall"])
         .assert()
         .success()
@@ -2750,6 +2919,11 @@ fn backend_fixture() -> BackendFixture {
         &engine,
         r#"#!/bin/sh
 printf '%s\n' "$*" >> "$DUAL_ENGINE_LOG"
+if [ -n "${DUAL_ENGINE_CACHE_LOG:-}" ]; then
+  printf 'PIXI_CACHE_DIR=%s\n' "${PIXI_CACHE_DIR:-}" > "$DUAL_ENGINE_CACHE_LOG"
+  printf 'PKG_PACKAGE_CACHE_DIR=%s\n' "${PKG_PACKAGE_CACHE_DIR:-}" >> "$DUAL_ENGINE_CACHE_LOG"
+  printf 'PKG_METADATA_CACHE_DIR=%s\n' "${PKG_METADATA_CACHE_DIR:-}" >> "$DUAL_ENGINE_CACHE_LOG"
+fi
 command_name=""
 manifest=""
 previous=""
@@ -2847,6 +3021,7 @@ fn dual_command(fixture: &BackendFixture) -> Command {
         .env("DUAL_ENGINE_PATH", &fixture.engine)
         .env("DUAL_ENGINE_LOG", &fixture.log)
         .env("DUAL_HOME", fixture.project.path().join("dual-home"))
+        .env("DUAL_CACHE_DIR", fixture.project.path().join("dual-cache"))
         .env("DUAL_TRUST_PROJECT", "1");
     command
 }
@@ -2859,6 +3034,7 @@ fn untrusted_dual_command(fixture: &BackendFixture, home: &std::path::Path) -> C
         .env("DUAL_ENGINE_PATH", &fixture.engine)
         .env("DUAL_ENGINE_LOG", &fixture.log)
         .env("DUAL_HOME", home)
+        .env("DUAL_CACHE_DIR", home.join("cache"))
         .env_remove("DUAL_TRUST_PROJECT");
     command
 }

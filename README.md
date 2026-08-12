@@ -115,6 +115,10 @@ dual export --renv                 Write a renv dependency helper
 dual export --dockerfile           Write a Dockerfile and .dockerignore
 dual task list                     List configured tasks
 dual task suggest                  Suggest common tasks from project files
+dual cache dir                     Print the shared package cache directory
+dual cache info                    Show shared cache usage
+dual cache prune                   Remove obsolete cache layout versions
+dual cache clean [--yes]           Remove all shared package cache entries
 dual shell                         Open a shell in the environment
 dual doctor                        Diagnose the project
 dual clean [--yes]                 Remove dual-generated environment files
@@ -122,6 +126,7 @@ dual lock migrate                  Upgrade dual.lock to the current format
 ```
 
 Commands including `dual deps`, `dual task list`, `dual task suggest`, `dual
+cache dir`, `dual cache info`, `dual cache prune`, `dual cache clean`, `dual
 doctor`, and `dual import FILE` accept `--json` for machine-readable output.
 
 Tasks can be simple command strings or dependency-aware tables:
@@ -460,6 +465,42 @@ package caches may remain available for the next attempt.
 
 `dual clean` removes only `.dual/`. It deliberately preserves `dual.lock`,
 `dual.toml`, scripts, data, results, and other user files.
+
+## Shared package cache
+
+Dual reuses downloaded conda packages, Python distributions and builds, R
+package archives, and repository metadata across projects. The cache is a
+disposable performance optimization: project environments remain under
+`.dual/`, while exact dependency selections remain in `dual.lock`.
+
+The default cache directory follows the operating system: `~/Library/Caches/dual`
+on macOS, `$XDG_CACHE_HOME/dual` or `~/.cache/dual` on other Unix systems, and
+`%LOCALAPPDATA%\dual\cache` on Windows. Set `DUAL_CACHE_DIR` to an absolute or
+working-directory-relative path to use a different location, including a
+workspace cache in CI. Dual routes its environment engine and `pak` into
+separate, versioned buckets beneath this directory.
+
+`dual cache info` reports cache usage, and `dual cache dir` prints the active
+location. `dual cache prune` removes only obsolete cache layout versions.
+`dual cache clean` removes every versioned package and metadata bucket after
+confirmation; use `--yes` for automation. Cache maintenance waits for active
+Dual package operations, cache deletion never follows symlinks, and a marker
+prevents Dual from cleaning an unrelated non-empty directory.
+
+`dual up --refresh` re-resolves dependencies but still reuses valid downloaded
+artifacts. It is intentionally separate from cache deletion. `dual clean`
+continues to remove only the current project's `.dual/` state, and removing the
+shared cache does not remove an already prepared project environment. Dual
+does not add `.env` values, project trust records, or credentials to cache keys
+or its cache-management metadata.
+
+In CI, set `DUAL_CACHE_DIR` to a stable workspace or runner cache path and
+persist that directory with the CI provider's cache facility. Use the runner
+OS and a hash of `dual.lock` in the primary key, with an OS-only restore prefix
+so unchanged artifacts can be reused after intentional lockfile updates. Cache
+the package directory, not `.dual/`; project environments remain disposable
+job output. `dual cache prune` is safe to run after restoring a cache produced
+by an older Dual cache layout.
 
 ## Compatibility contract
 

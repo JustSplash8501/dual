@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::Parser;
 use dual::backend::{Backend, EnvironmentBackend};
-use dual::cli::{Cli, Commands, EngineCommand, Language, LockCommand, TaskCommand};
+use dual::cli::{CacheCommand, Cli, Commands, EngineCommand, Language, LockCommand, TaskCommand};
 use dual::config::{starter_config, Config};
 use dual::imports;
 use dual::metadata::{self, AddOptions, ScriptLanguage};
@@ -206,6 +206,18 @@ fn run() -> Result<()> {
             }
             Ok(())
         }
+        Commands::Cache {
+            command: CacheCommand::Dir,
+        } => cache_dir(json),
+        Commands::Cache {
+            command: CacheCommand::Info,
+        } => cache_info(json),
+        Commands::Cache {
+            command: CacheCommand::Prune,
+        } => cache_prune(json),
+        Commands::Cache {
+            command: CacheCommand::Clean { yes },
+        } => cache_clean(yes, json),
         Commands::Shell => {
             let root = Config::find_root(&current)?;
             let backend = EnvironmentBackend::new(&root, verbose);
@@ -216,6 +228,7 @@ fn run() -> Result<()> {
             if let Some(root) = root {
                 let backend = EnvironmentBackend::new(&root, verbose);
                 if backend.environment_exists() {
+                    dual::cache::prepare()?;
                     let trust = security::ensure_project_trusted(&root, trust_project)?;
                     let config = Config::load(&root)?;
                     backend.verify_manifest(&config)?;
@@ -447,6 +460,7 @@ fn up(
     refresh: bool,
     trust_project: bool,
 ) -> Result<()> {
+    dual::cache::prepare()?;
     let config = Config::load(root)?;
     let trust = security::ensure_project_trusted(root, trust_project)?;
 
@@ -476,6 +490,7 @@ fn up(
 }
 
 fn shell(root: &std::path::Path, backend: &impl Backend, trust_project: bool) -> Result<()> {
+    dual::cache::prepare()?;
     let config = Config::load(root)?;
     if !backend.environment_exists() {
         anyhow::bail!("The project environment has not been created. Run `dual up` first.");
@@ -519,6 +534,102 @@ fn confirm_clean() -> Result<bool> {
         answer.trim().to_ascii_lowercase().as_str(),
         "y" | "yes"
     ))
+}
+
+fn cache_dir(json: bool) -> Result<()> {
+    let directory = dual::cache::cache_dir()?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({ "directory": directory }))?
+        );
+    } else {
+        println!("{}", directory.display());
+    }
+    Ok(())
+}
+
+fn cache_info(json: bool) -> Result<()> {
+    let report = dual::cache::inspect()?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+    println!("Cache: {}", report.directory.display());
+    println!("Layout: v{}", report.layout_version);
+    println!(
+        "Usage: {} in {} files",
+        human_bytes(report.bytes),
+        report.files
+    );
+    for bucket in report.buckets {
+        println!(
+            "  {}: {} in {} files",
+            bucket.name,
+            human_bytes(bucket.bytes),
+            bucket.files
+        );
+    }
+    Ok(())
+}
+
+fn cache_prune(json: bool) -> Result<()> {
+    let report = dual::cache::prune()?;
+    print_cache_removal("Pruned obsolete cache data", report, json)
+}
+
+fn cache_clean(yes: bool, json: bool) -> Result<()> {
+    if !yes && !confirm_cache_clean()? {
+        println!("Cache clean cancelled.");
+        return Ok(());
+    }
+    let report = dual::cache::clean()?;
+    print_cache_removal("Removed cached package data", report, json)
+}
+
+fn print_cache_removal(
+    message: &str,
+    report: dual::cache::CacheRemovalReport,
+    json: bool,
+) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!(
+            "{message}: {} in {} files.",
+            human_bytes(report.bytes),
+            report.files
+        );
+    }
+    Ok(())
+}
+
+fn confirm_cache_clean() -> Result<bool> {
+    use std::io::{self, Write};
+
+    print!("Remove all packages and metadata from Dual's shared cache? [y/N] ");
+    io::stdout().flush()?;
+    let mut answer = String::new();
+    io::stdin().read_line(&mut answer)?;
+    Ok(matches!(
+        answer.trim().to_ascii_lowercase().as_str(),
+        "y" | "yes"
+    ))
+}
+
+fn human_bytes(bytes: u64) -> String {
+    const UNITS: &[&str] = &["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
 }
 
 fn display_relative(root: &std::path::Path, path: &std::path::Path) -> String {

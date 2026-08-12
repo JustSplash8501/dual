@@ -210,6 +210,12 @@ pub enum Commands {
         command: LockCommand,
     },
 
+    /// Inspect and manage Dual's shared package cache.
+    Cache {
+        #[command(subcommand)]
+        command: CacheCommand,
+    },
+
     /// Open an interactive shell inside the project environment.
     Shell,
 
@@ -246,6 +252,25 @@ pub enum EngineCommand {
 pub enum LockCommand {
     /// Rewrite dual.lock using the current lockfile format.
     Migrate,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum CacheCommand {
+    /// Print the shared cache directory.
+    Dir,
+
+    /// Show cache usage by package ecosystem.
+    Info,
+
+    /// Remove cache data from obsolete layout versions.
+    Prune,
+
+    /// Remove all downloaded package and metadata cache entries.
+    Clean {
+        /// Skip the confirmation prompt.
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]

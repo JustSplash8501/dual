@@ -144,6 +144,7 @@ jobs:
         env:
           DUAL_BIN: ${{ github.workspace }}/target/release/dual
           DUAL_HOME: ${{ runner.temp }}/dual-home
+          DUAL_CACHE_DIR: ${{ runner.temp }}/dual-cache
           DUAL_ENGINE_DISABLE_PATH_FALLBACK: "1"
         run: bash scripts/ci/real-integration.sh
 
@@ -153,5 +154,6 @@ jobs:
         env:
           DUAL_BIN: ${{ github.workspace }}\target\release\dual.exe
           DUAL_HOME: ${{ runner.temp }}\dual-home
+          DUAL_CACHE_DIR: ${{ runner.temp }}\dual-cache
           DUAL_ENGINE_DISABLE_PATH_FALLBACK: "1"
         run: ./scripts/ci/real-integration.ps1

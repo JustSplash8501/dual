@@ -659,6 +659,79 @@ dual --json task suggest
 
 Discovers common Python and R test files and suggests task names, commands, and packages. With `--json`, prints the discovered files and suggestions.
 
+### `dual cache dir`
+
+#### Name
+
+`dual-cache-dir`
+
+#### Usage
+
+```console
+dual cache dir
+dual --json cache dir
+```
+
+#### Value
+
+Prints the active shared package cache directory. The command does not create the directory.
+
+### `dual cache info`
+
+#### Name
+
+`dual-cache-info`
+
+#### Usage
+
+```console
+dual cache info
+dual --json cache info
+```
+
+#### Value
+
+Reports total files and bytes in the current cache layout plus separate environment, R package, and R metadata buckets. With `--json`, prints a structured cache report.
+
+### `dual cache prune`
+
+#### Name
+
+`dual-cache-prune`
+
+#### Usage
+
+```console
+dual cache prune
+dual --json cache prune
+```
+
+#### Value
+
+Removes cache directories from obsolete Dual cache layout versions. It preserves all entries in the current layout and reports the number of removed files and bytes.
+
+### `dual cache clean`
+
+#### Name
+
+`dual-cache-clean`
+
+#### Usage
+
+```console
+dual cache clean
+dual cache clean --yes
+dual --json cache clean --yes
+```
+
+#### Arguments
+
+`--yes`, `-y`: Skip the confirmation prompt.
+
+#### Value
+
+Removes all versioned package and metadata buckets from Dual's shared cache. It preserves the cache ownership marker and operation lock, does not follow symlinks, and refuses to clean a non-empty directory that Dual has not marked as its cache.
+
 ### `dual shell`
 
 #### Name
@@ -1017,6 +1090,28 @@ backend.ensure_available()?;
 
 `doctor(config)`: Return diagnostic information.
 
+### Cache API
+
+#### Name
+
+`dual::cache`
+
+#### Main Types
+
+`CacheReport`: Active cache directory, layout version, total usage, and per-ecosystem bucket usage.
+
+`CacheRemovalReport`: Files, directories, and bytes removed by a cache maintenance operation.
+
+#### Main Functions
+
+`cache::cache_dir()`: Resolve `DUAL_CACHE_DIR` or the platform default cache directory without creating it.
+
+`cache::inspect()`: Inspect the current versioned cache layout.
+
+`cache::prune()`: Remove obsolete cache layout versions under an exclusive operation lock.
+
+`cache::clean()`: Remove all versioned package and metadata buckets under an exclusive operation lock.
+
 ### Security API
 
 #### Name
@@ -1110,6 +1205,8 @@ not already defined by the invoking environment or command.
 ## Environment Variables
 
 `DUAL_HOME`: Override the data directory used for trust records and private engine support.
+
+`DUAL_CACHE_DIR`: Override the shared package cache directory. Relative values are resolved from the invoking working directory.
 
 `DUAL_TRUST_PROJECT`: Set to `1`, `true`, or `yes` to authorize trust noninteractively.
 
