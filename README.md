@@ -4,30 +4,98 @@
 
 # dual
 
-**A simple CLI for reproducible projects that use R, Python, or both.**
+**A cross-platform CLI for reproducible scientific projects using R, Python, or both—one config, one lockfile, one command.**
 
 [![CI](https://github.com/JustSplash8501/dual/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/JustSplash8501/dual/actions/workflows/ci.yml?query=branch%3Amain)
+[![Release](https://img.shields.io/github/v/release/JustSplash8501/dual)](https://github.com/JustSplash8501/dual/releases/latest)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Platforms](https://img.shields.io/badge/platforms-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey.svg)](#cross-platform-behavior)
+[![Platforms](https://img.shields.io/badge/platforms-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey.svg)](#supported-platforms)
 
-You should not need to learn renv, venv, uv, conda, or reticulate just
-to run an analysis. `dual` gives a project one user-facing configuration file,
-one command-line interface, and one reproducible environment.
+Scientific projects often accumulate separate tools for R, Python, runtime
+versions, package installation, task execution, and lockfiles. Dual coordinates
+those pieces behind one project-level interface:
 
-> `dual` is an early MVP. The configuration and lock formats
-> may change before 1.0.
+- declare R and Python dependencies together in `dual.toml`
+- commit one `dual.lock` so collaborators use the same resolution
+- run scripts and named tasks inside the project environment
+- work across Linux, macOS, and Windows without globally installing R or Python
 
-## Quickstart
+Dual is an early pre-1.0 project. Configuration and lock formats may evolve as
+the project gathers real-world feedback.
+
+## See it in action
+
+<p align="center">
+  <img src="docs/assets/dual-demo.gif" alt="Creating a mixed R and Python project and adding dependencies with Dual" width="800">
+</p>
+
+## Install
+
+Download the archive for your platform from the
+[latest GitHub release](https://github.com/JustSplash8501/dual/releases/latest),
+verify it against `SHA256SUMS`, extract it, and place `dual` (or `dual.exe`) on
+your `PATH`.
+
+Prebuilt archives are available for:
+
+- Linux x86-64
+- macOS Apple Silicon
+- macOS Intel
+- Windows x86-64
+
+The release archives include SHA-256 checksums and GitHub build-provenance
+attestations. Dual installs its private environment support on first use. It
+does not modify shell startup files, and neither R nor Python needs to be
+installed globally.
+
+To build from source instead, install Rust 1.88 or newer and run:
 
 ```console
-dual init cli-tools
+git clone https://github.com/JustSplash8501/dual.git
+cd dual
+cargo build --locked --release
+```
+
+The binary will be at `target/release/dual` on Linux and macOS or
+`target\release\dual.exe` on Windows.
+
+## Try the mixed-language example
+
+The repository includes a small project that runs one R analysis and one
+Python model in the same managed environment:
+
+```console
+git clone https://github.com/JustSplash8501/dual.git
+cd dual/examples/basic-mixed
+dual --trust-project up
+dual run analysis
+dual run model
+```
+
+The example creates `results/languages.csv` and `results/model.txt`. It also
+checks that R's `reticulate` can use the Python interpreter from the project
+environment.
+
+`--trust-project` is intentional: package installation and project tasks can
+execute code with your user permissions. Review an unfamiliar project before
+trusting it.
+
+## Start a project
+
+Create a directory, initialize Dual, and add dependencies from both ecosystems:
+
+```console
+mkdir cli-tools
+cd cli-tools
+
+dual init --r 4.5 --python 3.12
 dual add r dplyr ggplot2 tidyr
 dual add py pandas scikit-learn
 dual --trust-project up
-dual run analysis
 ```
 
-Add task commands to `dual.toml` before running them:
+Dual writes the human-edited project definition to `dual.toml`. Named tasks can
+be strings or dependency-aware tables:
 
 ```toml
 [project]
@@ -35,161 +103,90 @@ name = "cli-tools"
 
 [r]
 version = "4.5"
-cran = [
-  "tidyverse",
-  "targets@1.11.4",
-]
-bioc = ["DESeq2"]
-github = ["r-lib/pak@v0.9.0"]
+cran = ["dplyr", "ggplot2", "tidyr"]
+bioc = []
+github = []
 
 [python]
 version = "3.12"
-dependencies = ["pandas", "scikit-learn", "xgboost"]
+dependencies = ["pandas", "scikit-learn"]
 
-[quarto]
-enabled = false
-
-[tasks]
-analysis = "Rscript scripts/analysis.R"
-model = "python scripts/model.py"
-report = "quarto render manuscript.qmd"
-```
-
-## Philosophy
-
-`dual` is not a package manager. It is a project runner and environment
-coordinator. It provides cross-platform R, Python, package resolution,
-environments, and lockfiles through one focused interface.
-
-Users edit `dual.toml`, commit `dual.lock`, and run `dual` commands. Internal
-environment state is stored under `.dual/` and should not be edited directly.
-
-Python packages are resolved from PyPI. R and Python runtimes are resolved from
-conda-forge. Plain R package names such as `dplyr` are also resolved from
-conda-forge using the predictable `r-<lowercase-name>` convention.
-
-R packages can explicitly use CRAN, Bioconductor, or GitHub when a conda-forge
-build is unavailable:
-
-```toml
-[r]
-version = "4.5"
-packages = [
-  "cran::targets@1.11.4",
-  "bioc::DESeq2",
-  "github::r-lib/pak@v0.9.0",
-  "actualName=github::owner/different-repository-name@abc123",
-]
-```
-
-Source-backed R packages are resolved and installed by
-[`pak`](https://pak.r-lib.org/) inside the project environment. Pin GitHub
-packages to a tag or commit for reproducibility. When the repository name is
-not the R package name, use the `packageName=github::owner/repository` form.
-Unlike conda artifacts, old CRAN repository URLs can disappear, so these
-source locks are less durable than `dual.lock`. Packages that compile native
-code may also require build libraries available from the operating system or
-conda-forge.
-
-## Commands
-
-```text
-dual init [PROJECT_NAME] [--python VERSION] [--r VERSION]
-                                      Create dual.toml and project directories
-dual add r PACKAGE...              Add R packages
-dual add py PACKAGE...             Add Python packages
-dual remove r PACKAGE...           Remove R packages
-dual remove py PACKAGE...          Remove Python packages
-dual enable r|py [--version VER]   Add or update a project runtime
-dual disable r|py [--force]        Remove a project runtime
-dual import FILE                   Import pyproject.toml, requirements.txt,
-                                   renv.lock, env.lock, uv.lock, or environment.yml
-dual up                            Create or update the environment
-dual up --refresh                  Re-resolve and update the shared lockfile
-dual run TASK                      Run a configured project task
-dual run FILE                      Run a .py, .R, .qmd, or .Rmd file
-dual sync [--script FILE]          Prepare dependencies without running code
-dual deps [--script FILE]          Show effective dependencies
-dual export --requirements         Write requirements.txt
-dual export --renv                 Write a renv dependency helper
-dual export --dockerfile           Write a Dockerfile and .dockerignore
-dual task list                     List configured tasks
-dual task suggest                  Suggest common tasks from project files
-dual cache dir                     Print the shared package cache directory
-dual cache info                    Show shared cache usage
-dual cache prune                   Remove obsolete cache layout versions
-dual cache clean [--yes]           Remove all shared package cache entries
-dual shell                         Open a shell in the environment
-dual doctor                        Diagnose the project
-dual clean [--yes]                 Remove dual-generated environment files
-dual lock migrate                  Upgrade dual.lock to the current format
-```
-
-Commands including `dual deps`, `dual task list`, `dual task suggest`, `dual
-cache dir`, `dual cache info`, `dual cache prune`, `dual cache clean`, `dual
-doctor`, and `dual import FILE` accept `--json` for machine-readable output.
-
-Tasks can be simple command strings or dependency-aware tables:
-
-```toml
 [tasks]
 prepare = "python scripts/prepare.py"
 analysis = { cmd = "Rscript scripts/analysis.R", deps = ["prepare"] }
 ```
 
-When you run `dual run analysis`, Dual runs `prepare` first and rejects
-dependency cycles.
-
-Pass script or task arguments after `--`:
+Run the workflow with:
 
 ```console
-dual run analysis.py -- --input data.csv --limit 10
-dual run analysis -- --input data.csv --limit 10
+dual run analysis
 ```
 
-Existing projects can be brought into Dual with:
+Dual runs `prepare` first, rejects dependency cycles, and forwards arguments
+placed after `--` to the requested script or task.
 
-```console
-dual import pyproject.toml
-dual import requirements.txt
-dual import renv.lock
-dual import uv.lock
-dual import environment.yml
-dual import env.lock
+## Command overview
+
+```text
+dual init                   Initialize a project or an inline script
+dual add                    Add R or Python dependencies
+dual remove                 Remove R or Python dependencies
+dual enable                 Add or update a project runtime
+dual disable                Remove a project runtime
+dual import                 Import an existing dependency or lock file
+dual up                     Create or update the project environment
+dual run                    Run a named task or supported file
+dual sync                   Prepare dependencies without running code
+dual deps                   Show the effective dependencies
+dual export                 Write requirements, renv, or Docker helpers
+dual task list              List configured tasks
+dual task suggest           Suggest tasks found in project files
+dual lock migrate           Upgrade dual.lock to the current format
+dual cache dir              Print the shared cache directory
+dual cache info             Show shared cache usage
+dual cache prune            Remove obsolete cache layouts
+dual cache clean            Remove all shared cache entries
+dual shell                  Open a shell in the project environment
+dual doctor                 Diagnose Dual and the current project
+dual clean                  Remove generated project environment files
 ```
 
-Imports add the dependencies Dual can model today and report skipped entries
-such as unsupported conda packages, Python environment markers, direct URL
-requirements, local/editable uv packages, or Poetry constraints that do not
-map cleanly to PEP 508. PEP 621 dependencies, optional dependency groups,
-standard dependency groups, Poetry dependency tables, hashed requirements,
-channel-qualified conda packages, and pip entries inside `environment.yml` are
-recognized. Pip index directives plus uv and Poetry index tables are imported
-into `[[python.index]]`. Requirement hashes are intentionally omitted because
-Dual resolves and records its own shared lock. Keep credentials out of index
-URLs—Dual rejects embedded URL credentials and preserves PyPI as the primary
-index when importing only `--extra-index-url`. Supply private-index
-authentication through the invoking environment.
+Run `dual <command> --help` for options and examples, or see the
+[complete command reference](docs/reference.md#command-reference).
 
-Dual can also discover common test files and suggest task entries without
-editing `dual.toml`:
+## What Dual manages
 
-```console
-dual task suggest
-dual --json task suggest
-```
+| File or directory | Purpose | Commit it? |
+| --- | --- | --- |
+| `dual.toml` | Runtimes, direct dependencies, sources, and tasks | Yes |
+| `dual.lock` | Exact shared dependency resolution | Yes |
+| `.dual/` | Generated local project environment | No |
+| `.env` | Optional local variables supplied to trusted tasks | No |
 
-## Script workflows
+Plain `dual up` enforces an existing lockfile and creates one when none exists.
+Use `dual up --refresh` only when you intentionally want to resolve new package
+versions, then commit `dual.toml` and `dual.lock` together.
 
-Dual can keep dependencies next to a Python, R, Quarto, or R Markdown file:
+Downloaded packages are cached across projects while each project's environment
+remains isolated under `.dual/`.
 
-```console
-dual init --script analysis.py --python 3.12
-dual add --script analysis.py 'requests<3' rich
-dual run analysis.py
-```
+## Designed for mixed scientific workflows
 
-Python uses PEP 723-compatible metadata:
+Dual can:
+
+- create mixed, Python-only, R-only, and Quarto-enabled projects
+- resolve Python packages from PyPI and R packages from conda-forge, CRAN,
+  Bioconductor, or GitHub
+- import `pyproject.toml`, `requirements.txt`, `uv.lock`, `renv.lock`,
+  `environment.yml`, and `env.lock`
+- run Python, R, Quarto, and R Markdown files directly
+- keep dependencies beside individual scripts using PEP 723-compatible metadata
+  for Python and equivalent metadata blocks for R and mixed documents
+- define task dependencies and forward command-line arguments
+- export `requirements.txt`, an renv dependency helper, or a reviewable Dockerfile
+- produce machine-readable JSON for inspection and automation commands
+
+For example, a standalone Python script can carry its own environment request:
 
 ```python
 # /// script
@@ -201,413 +198,76 @@ Python uses PEP 723-compatible metadata:
 # ///
 ```
 
-R uses the same block shape with R-specific fields:
-
-```r
-# /// script
-# r = ">=4.4"
-# cran = ["tidyverse", "lme4"]
-# bioc = ["DESeq2"]
-# github = ["hadley/emo"]
-# ///
-```
-
-Quarto and R Markdown use an HTML comment:
-
-```markdown
-<!-- /// script
-python = ">=3.12"
-r = ">=4.4"
-python-dependencies = ["pandas", "matplotlib"]
-cran = ["tidyverse", "knitr"]
-bioc = []
-github = []
-/// -->
-```
-
-Use `dual add --script report.qmd --python pandas` or
-`dual add --script report.qmd --r tidyverse` when a document can use both
-languages. `--index URL`, `--bioc`, and `--github OWNER/REPO` select package
-sources. `dual run FILE --dry-run` shows the plan, and `--no-install` requires
-an already prepared matching environment.
-
-When a project `dual.toml` is found above the script, Dual merges it with the
-inline metadata. Inline version requirements take precedence and dependency
-lists are combined without duplicates.
-
-Executable scripts can use this portable shebang on systems whose `env`
-supports `-S`:
-
-```text
-#!/usr/bin/env -S dual run
-```
-
-The shorter `#!/usr/bin/env dual run` form is not portable because many
-implementations treat `dual run` as one executable name.
-
-When `PROJECT_NAME` is omitted, `dual init` uses the current directory name.
-Project names must start and end with a letter or number and may contain only
-ASCII letters, numbers, hyphens, and underscores.
-
-By default, `dual init` creates a mixed R and Python project. Pass one language
-option to create a smaller single-language environment, or pass both to select
-explicit versions for a mixed project:
+Run it with:
 
 ```console
-dual init python-analysis --python 3.13
-dual init r-analysis --r 4.5
-dual init mixed-analysis --python 3.13 --r 4.5
+dual run analysis.py
 ```
 
-In `dual.toml`, `[r]` and `[python]` are individually optional. Normal projects
-require at least one; a Quarto-only project can instead set `quarto.enabled =
-true`. Existing project files containing both sections continue to work
-unchanged. Adding or importing a dependency for an omitted language adds that
-language with Dual's default runtime version unless the import provides a
-version.
+See the [reference manual](docs/reference.md) for R, Quarto, and R Markdown
+metadata formats and the complete command reference.
 
-Move between single- and mixed-language projects in place:
+## Why another tool?
 
-```console
-dual enable r                       # use the default R version
-dual enable py --version 3.13       # use an explicit Python version
-dual up --refresh
+`renv`, `uv`, virtual environments, conda, and reticulate each solve important
+parts of this problem. Dual is useful when the project boundary crosses those
+ecosystems and collaborators should not need to assemble the same toolchain by
+hand.
 
-dual disable r
-dual up --refresh
-```
+Dual is not a replacement package manager. It is a project runner and
+environment coordinator that presents package resolution, runtimes, lockfiles,
+and tasks through one focused interface.
 
-Enabling an existing runtime without `--version` is a no-op; supplying a new
-version updates it without changing its packages. Disabling removes the whole
-language section. Dual refuses to disable a runtime that still has configured
-packages, Python indexes, or tasks that invoke it or reference compatible
-scripts or documents, and it refuses to remove the last runtime unless Quarto
-is enabled. `--force` removes configured packages and indexes, but does not
-override task or last-runtime protection.
-Neither command changes the existing environment or `dual.lock`; run the
-suggested `dual up --refresh` to apply the new configuration.
+## Safety and reproducibility
 
-Commands that install packages or execute project code require explicit
-repository trust on first use:
+Dual treats project configuration, dependency installation, and task execution
+as trust boundaries. Among other safeguards, it:
 
-```sh
-dual --trust-project up
-```
+- requires explicit trust before installing packages or executing project code
+- invalidates trust when relevant project inputs change
+- rejects unsafe symbolic links and special files in managed paths
+- strips common cloud, registry, and SSH credentials from package operations by
+  default
+- applies project `.env` values only to trusted user tasks and shells, not to
+  Dual's own control plane
+- updates environments and lockfiles failure-safely
+- serializes concurrent commands that could modify the same project
 
-Trust is tied to the canonical project path and the contents of all project
-files except `.git/`, `.dual/`, `results/`, and Dual's data directory when it
-is inside the project. Changing scripts, configuration, lockfiles, data, or
-other task inputs requires reviewing and trusting the project again. Generated
-files under `results/` do not invalidate trust. Symbolic links and special files
-are rejected in trusted projects. CI can set `DUAL_TRUST_PROJECT=1` as an
-explicit noninteractive authorization.
+Do not run Dual with elevated privileges. See [SECURITY.md](SECURITY.md) for the
+vulnerability-reporting policy and the [reference manual](docs/reference.md)
+for the detailed safety contract.
 
-## Project environment variables
+## Supported platforms
 
-An optional `.env` at the project root supplies variables to configured tasks,
-direct script and document runs, and `dual shell`. The same file works across
-Python, R, Quarto, and R Markdown:
+Dual targets:
 
-```dotenv
-DATABASE_URL=postgres://localhost/research
-API_TOKEN="local-development-token"
-```
+- Linux x86-64 (`linux-64`)
+- macOS Intel (`osx-64`)
+- macOS Apple Silicon (`osx-arm64`)
+- Windows 10/11 x86-64 (`win-64`)
 
-```python
-import os
-print(os.environ["DATABASE_URL"])
-```
-
-```r
-Sys.getenv("DATABASE_URL")
-```
-
-Dual parses `.env` with `dotenvy`, including comments, quotes, multiline values,
-escapes, and variable substitution. It reads only `<project-root>/.env` and
-never searches parent directories. Values already supplied by the invoking
-environment take precedence; within `.env`, the first definition wins.
-
-Project variables are loaded only after trust verification and are attached to
-the user-facing child process without modifying Dual's own environment. They do
-not affect `dual up`, dependency installation, engine selection, trust, or
-diagnostics. In particular, private package-installation credentials must still
-be supplied by the invoking environment with `DUAL_ALLOW_CREDENTIALS=1`.
-
-Dual rejects `.env` entries that could alter its control plane, environment
-engine, executable lookup, dynamic loader, Python startup path, or R startup
-files. This includes `DUAL_*`, `PIXI_*`, `CONDA_*`, `MAMBA_*`, `RATTLER_*`,
-`PATH`, home and shell variables, `LD_*`/`DYLD_*` loader variables,
-`PYTHONHOME`, `PYTHONPATH`, `PYTHONSTARTUP`, and R home/profile/environment
-selectors, library paths, and the reticulate interpreter selector. A symlinked,
-malformed, non-UTF-8, or larger-than-1-MiB `.env` is
-also rejected. Keep `.env` out of version control by adding it to the project's
-`.gitignore`; commit a secret-free `.env.example` when collaborators need a
-template.
-
-Treat a Dual project like source code: package installation, lockfile contents,
-configured tasks, and interactive shells can execute code with your user
-permissions. Dual rejects symbolic links for its configuration and generated
-state paths, and it should not be run with elevated privileges.
-
-Environment preparation removes common cloud, registry, and SSH credential
-variables before invoking package tooling. Projects that intentionally require
-private package credentials can set `DUAL_ALLOW_CREDENTIALS=1` after reviewing
-the package sources and build backends.
-
-Pass `--verbose` before or after a command to show additional environment
-progress:
-
-```console
-dual --verbose up
-```
-
-Without `--verbose`, output stays focused on the project.
-
-## Installation
-
-Prebuilt releases install as a single `dual` command. On first use, `dual`
-automatically prepares the support files it needs under the user's dual data
-directory. It does not modify `PATH` or shell startup files, and users do not
-need to install a separate environment tool.
-
-R and Python do not need to be installed globally.
-
-### Install a release
-
-Download the archive for your platform from GitHub Releases, verify it against
-`SHA256SUMS`, extract it, and place `dual` (or `dual.exe`) on your `PATH`.
-Release archives are produced for Linux x86-64, macOS Apple Silicon, macOS
-Intel, and Windows x86-64. GitHub build-provenance attestations are published
-for every archive.
-
-Release signing is enabled when maintainers configure the Apple and Windows
-signing secrets documented in `CONTRIBUTING.md`. Without those optional
-credentials, releases still include SHA-256 checksums and GitHub provenance
-attestations.
-
-### Build from source
-
-[Rust](https://rustup.rs) 1.88 or newer is required only when building from
-source.
-
-```console
-git clone https://github.com/JustSplash8501/dual.git
-cd dual
-cargo build --release
-```
-
-The executable is written to `target/release/dual` on Linux and macOS, or
-`target\release\dual.exe` on Windows. Put it somewhere on your `PATH`.
-
-During development:
-
-```console
-cargo run -- --help
-cargo test
-cargo clippy --all-targets --all-features -- -D warnings
-cargo fmt --all -- --check
-```
-
-### Publishing releases
-
-Pushing a version tag that matches `Cargo.toml` builds archives for Linux
-x86-64, macOS Apple Silicon, macOS Intel, and Windows x86-64. The release
-workflow publishes a consolidated `SHA256SUMS` file and GitHub provenance
-attestations:
-
-```console
-git tag v0.1.1
-git push origin v0.1.1
-```
-
-## Mixed R/Python example
-
-[`examples/basic-mixed`](examples/basic-mixed) contains an R task, a Python
-task, and a `dual.toml` that installs both languages. Try it after building:
-
-```console
-cd examples/basic-mixed
-../../target/release/dual --trust-project up
-../../target/release/dual doctor
-../../target/release/dual run analysis
-../../target/release/dual run model
-```
-
-When `reticulate` is listed as an R package, `dual up` verifies that it can use
-the Python interpreter from the project environment.
-
-## Generated files
-
-`dual up`, `dual sync`, and successful script preparation create:
-
-- `dual.lock` — the exact, shareable resolution for conda-forge, PyPI, CRAN,
-  Bioconductor, and GitHub dependencies
-- `.dual/` — local generated environment state
-
-`.dual/` is generated locally and ignored. `dual.lock` is intentionally
-committed. It is a Dual-owned lockfile containing a neutral `environment`
-resolution, source-backed R resolution when needed, and a stable metadata
-summary containing requested runtime versions, direct dependencies, package
-sources, and an update timestamp. Internal generated formats remain
-implementation details under `.dual/`.
-
-When a collaborator receives `dual.toml` and `dual.lock`, `dual up` creates the
-environment with the shared resolution enforced.
-If `dual.toml` is intentionally changed, run `dual up --refresh` to re-resolve
-dependencies. Commit the updated `dual.toml` and `dual.lock` together.
-
-Environment updates are failure-safe. Dual does not mark a new environment as
-ready until dependency installation, source-backed R packages, bridge setup,
-and runtime validation all succeed. If an update fails, it restores the prior
-generated manifest, shared lockfile, readiness marker, and R/Python bridge. A
-failed first preparation removes its incomplete generated state; downloaded
-package caches may remain available for the next attempt.
-
-Commands that edit project configuration, prepare or use the generated
-environment, run tasks, prepare managed shell state, migrate the lockfile, clean
-generated state, or write dependency exports take a per-project process lock.
-This keeps concurrent `dual` commands from overwriting `.dual/`, `dual.toml`,
-or `dual.lock`. The default wait is five minutes; set `DUAL_LOCK_TIMEOUT` to a
-number of seconds to fail sooner or wait longer.
-
-`dual clean` removes only `.dual/`. It deliberately preserves `dual.lock`,
-`dual.toml`, scripts, data, results, and other user files.
-
-## Shared package cache
-
-Dual reuses downloaded conda packages, Python distributions and builds, R
-package archives, and repository metadata across projects. The cache is a
-disposable performance optimization: project environments remain under
-`.dual/`, while exact dependency selections remain in `dual.lock`.
-
-The default cache directory follows the operating system: `~/Library/Caches/dual`
-on macOS, `$XDG_CACHE_HOME/dual` or `~/.cache/dual` on other Unix systems, and
-`%LOCALAPPDATA%\dual\cache` on Windows. Set `DUAL_CACHE_DIR` to an absolute or
-working-directory-relative path to use a different location, including a
-workspace cache in CI. Dual routes its environment engine and `pak` into
-separate, versioned buckets beneath this directory.
-
-`dual cache info` reports cache usage, and `dual cache dir` prints the active
-location. `dual cache prune` removes only obsolete cache layout versions.
-`dual cache clean` removes every versioned package and metadata bucket after
-confirmation; use `--yes` for automation. Cache maintenance waits for active
-Dual package operations, cache deletion never follows symlinks, and a marker
-prevents Dual from cleaning an unrelated non-empty directory.
-
-`dual up --refresh` re-resolves dependencies but still reuses valid downloaded
-artifacts. It is intentionally separate from cache deletion. `dual clean`
-continues to remove only the current project's `.dual/` state, and removing the
-shared cache does not remove an already prepared project environment. Dual
-does not add `.env` values, project trust records, or credentials to cache keys
-or its cache-management metadata.
-
-In CI, set `DUAL_CACHE_DIR` to a stable workspace or runner cache path and
-persist that directory with the CI provider's cache facility. Use the runner
-OS and a hash of `dual.lock` in the primary key, with an OS-only restore prefix
-so unchanged artifacts can be reused after intentional lockfile updates. Cache
-the package directory, not `.dual/`; project environments remain disposable
-job output. `dual cache prune` is safe to run after restoring a cache produced
-by an older Dual cache layout.
-
-## Compatibility contract
-
-The following files and behaviors are public contracts:
-
-- `dual.toml` is strict TOML. Documented fields, legacy R and Python `packages`
-  aliases, optional `[r]`/`[python]` sections, and string or detailed task
-  forms are supported. Unknown fields are rejected so misspellings cannot
-  silently change an environment.
-- `dual.lock` is a Dual-owned, versioned JSON file. Lock format version 1 and
-  its legacy `pixi` field spelling remain readable; `dual lock migrate` rewrites
-  the legacy spelling. The `environment` payload is opaque and must not be
-  edited by hand. A newer unsupported lock version fails safely instead of
-  being guessed.
-- Inline script metadata is strict TOML inside the documented comment markers.
-  Python uses the PEP 723 fields Dual supports; R and mixed documents use the
-  documented Dual extensions. Unknown fields and cross-language fields in a
-  single-language script are rejected.
-- Project-root `.env` is local execution input, not dependency configuration.
-  Its values never enter `dual.lock`, generated manifests, dependency exports,
-  or Docker build contexts. Commit `.env.example`, not `.env`.
-- Plain `dual up` and project `dual sync` enforce an existing `dual.lock` and
-  create one when absent. Only `dual up --refresh` intentionally re-resolves a
-  project and updates the shared lock. Script sync prepares the script-specific
-  effective environment.
-
-Commit `dual.toml` and `dual.lock` together after an intentional refresh. Keep
-`.dual/` and `.env` local.
-
-## Docker export
-
-`dual export --dockerfile` rewrites the generated `Dockerfile` but preserves
-existing `.dockerignore` content and appends any missing safety rules. It also
-excludes `.env`, `.env.*`, `.dual/`, Git metadata, Rust build output, and
-`results/`; `.env.example` remains available to the build context.
-
-Python-only exports use the configured Python version as the official Python
-image tag. R and mixed exports use the configured `rocker/r-ver` tag. In a
-mixed export, the R image's distribution supplies Python; the build verifies
-that its major/minor series matches `python.version` and fails with a direct
-explanation if it does not. Configured Python indexes are written to both
-`requirements.txt` and the Docker installation input.
-
-Docker image selection needs an exact version or a usable lower bound such as
-`>=3.12`. Wildcards, upper-bound-only constraints, and strict greater-than
-constraints are rejected because they do not identify a safe base-image tag.
-
-R packages are installed through `pak`, so CRAN, Bioconductor, GitHub, aliases,
-and supported version pins keep their `dual.toml` meaning. Native R and Python
-packages can require operating-system development libraries. Supply them
-without rewriting the generated install layer:
-
-```console
-docker build \
-  --build-arg DUAL_SYSTEM_PACKAGES="libcurl4-openssl-dev libssl-dev libxml2-dev" \
-  .
-```
-
-The generated image intentionally does not infer system libraries, install
-Quarto, copy `.env`, reproduce task execution, or replace a reviewed production
-container design. CI smoke testing builds a mixed R/Python export for pull
-requests and weekly with CRAN and PyPI packages plus a real system-library
-dependency.
-
-## Cross-platform behavior
-
-The CLI targets Linux, macOS Intel, macOS Apple Silicon, and Windows 10/11.
-Generated environments declare `linux-64`, `osx-64`, `osx-arm64`, and
-`win-64`. Commands run through the project environment instead of assuming a
-global R, Python, shell, or `.venv` layout. `dual shell` opens an activated
-shell whose prompt is prefixed with the project name, such as `(cli-tools)`.
-Interactive R sessions also identify the loaded project and Dual version:
-
-```text
-R 4.6.0 restarted.
-- Project '~/path/to/cli-tools' loaded. [dual 0.1.1]
-```
-
-The R version line is produced by the editor from the actual configured
-interpreter; Dual produces only the project-loaded line. Dual preserves the
-usual R startup behavior by loading the project's `.Rprofile`, or the user's
-`~/.Rprofile` when the project does not provide one, before printing its
-banner. This allows tools such as `renv` to continue activating normally.
+Commands run through the project environment instead of assuming a global R,
+Python, shell, or `.venv` layout.
 
 ## Scope
 
-The MVP deliberately has no GUI, editor integration, or SLURM support. Quarto
-and R Markdown files can be run directly. Docker export remains a reviewable
-starting point rather than a complete container build system. The goal is a
-small, legible foundation that makes ordinary scientific projects easy to
-reproduce.
+Dual currently has no GUI, editor integration, or SLURM support. Quarto and R
+Markdown files can be run directly. Docker export is a reviewable starting point
+rather than a complete production container system.
 
-## Contributing
+## Documentation and contributing
 
-See [`CONTRIBUTING.md`](CONTRIBUTING.md) for development setup, required
-checks, real environment integration tests, and pull request guidance.
+- [Reference manual](docs/reference.md)
+- [Mixed R/Python example](examples/basic-mixed)
+- [Contributing guide](CONTRIBUTING.md)
+- [Security policy](SECURITY.md)
+- [Release downloads](https://github.com/JustSplash8501/dual/releases)
+
+Issues and pull requests are welcome. For substantial behavior or configuration
+changes, please open an issue first so the design can be discussed.
 
 ## License
 
-MIT
-
-See [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) for automatically
-provisioned third-party components.
+Dual is available under the [MIT License](LICENSE). See
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for automatically provisioned
+third-party components.
