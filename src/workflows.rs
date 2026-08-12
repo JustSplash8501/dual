@@ -48,6 +48,7 @@ pub fn run_script(
         return Ok(());
     }
 
+    let _project_lock = security::acquire_project_lock(&effective.root, "project")?;
     let backend = EnvironmentBackend::for_script(&effective.root, &effective.script, verbose);
     let trust = security::ensure_project_trusted(&effective.root, trust_project)?;
     let project_environment = ProjectEnvironment::load(&effective.root)?;
@@ -103,6 +104,7 @@ pub fn sync_script(path: &Path, verbose: bool, trust_project: bool, dry_run: boo
         );
         return Ok(());
     }
+    let _project_lock = security::acquire_project_lock(&effective.root, "project")?;
     let backend = EnvironmentBackend::for_script(&effective.root, &effective.script, verbose);
     let trust = security::ensure_project_trusted(&effective.root, trust_project)?;
     backend.ensure_available()?;
@@ -121,6 +123,7 @@ pub fn sync_project(root: &Path, verbose: bool, trust_project: bool, dry_run: bo
         print_dependencies(&config, Some("project dual.toml"));
         return Ok(());
     }
+    let _project_lock = security::acquire_project_lock(root, "project")?;
     // Project sync has the same lock semantics as plain `dual up`: an
     // existing shared lock is enforced. Re-resolution stays an explicit
     // `dual up --refresh` operation.

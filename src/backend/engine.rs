@@ -438,6 +438,10 @@ impl EnvironmentBackend {
     }
 
     fn install_engine(&self) -> Result<()> {
+        let _engine_lock = security::acquire_engine_lock("engine")?;
+        if self.is_available() {
+            return Ok(());
+        }
         println!("Installing environment support...");
         self.prepare_engine_home()?;
 
@@ -966,6 +970,7 @@ impl Backend for EnvironmentBackend {
     }
 
     fn update_engine(&self) -> Result<()> {
+        let _engine_lock = security::acquire_engine_lock("engine")?;
         println!("Updating environment support...");
         self.prepare_engine_home()?;
         self.download_engine()?;
@@ -974,6 +979,7 @@ impl Backend for EnvironmentBackend {
     }
 
     fn uninstall_engine(&self) -> Result<bool> {
+        let _engine_lock = security::acquire_engine_lock("engine")?;
         let home = self.engine_home();
         if !home.exists() {
             return Ok(false);
@@ -1234,8 +1240,10 @@ impl Backend for EnvironmentBackend {
         config: &Config,
         project_environment: &ProjectEnvironment,
     ) -> Result<()> {
+        let project_lock = security::acquire_project_lock(&self.root, "project")?;
         self.verify_manifest(config)?;
         self.stage_lock()?;
+        drop(project_lock);
         #[cfg(windows)]
         {
             let result = windows_shell(self, config, project_environment);
